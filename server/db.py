@@ -55,8 +55,33 @@ CREATE TABLE IF NOT EXISTS parts (
     file_path TEXT NOT NULL,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
-    created_by TEXT REFERENCES members(id)
+    created_by TEXT REFERENCES members(id),
+    date TEXT
 );
+
+CREATE TABLE IF NOT EXISTS invoices (
+    id TEXT PRIMARY KEY,
+    vendor TEXT,
+    total_cents INTEGER,
+    date TEXT,
+    notes TEXT NOT NULL DEFAULT '',
+    author_id TEXT REFERENCES members(id),
+    file_path TEXT NOT NULL,
+    assets TEXT NOT NULL DEFAULT '[]',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_invoices_date ON invoices(date DESC);
+CREATE INDEX IF NOT EXISTS idx_invoices_vendor ON invoices(vendor);
+
+CREATE TABLE IF NOT EXISTS invoice_parts (
+    invoice_id TEXT NOT NULL REFERENCES invoices(id) ON DELETE CASCADE,
+    part_id TEXT NOT NULL REFERENCES parts(id) ON DELETE CASCADE,
+    PRIMARY KEY (invoice_id, part_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_invoice_parts_part ON invoice_parts(part_id);
 
 CREATE INDEX IF NOT EXISTS idx_parts_name ON parts(name);
 CREATE INDEX IF NOT EXISTS idx_parts_category ON parts(category);
@@ -119,6 +144,7 @@ class DB:
         """Idempotent column additions for existing databases."""
         migrations = [
             "ALTER TABLE parts ADD COLUMN status TEXT",
+            "ALTER TABLE parts ADD COLUMN date TEXT",
         ]
         for stmt in migrations:
             try:
@@ -234,8 +260,8 @@ class DB:
                 """INSERT INTO parts
                    (id,name,category,supplier,link,unit,unit_cost_cents,
                     on_hand,on_order,target_min,status,notes,image,tags,assets,
-                    file_path,created_at,updated_at,created_by)
-                   VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                    file_path,created_at,updated_at,created_by,date)
+                   VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                    ON CONFLICT(id) DO UPDATE SET
                      name=excluded.name, category=excluded.category,
                      supplier=excluded.supplier, link=excluded.link,
@@ -245,7 +271,8 @@ class DB:
                      notes=excluded.notes,
                      image=excluded.image, tags=excluded.tags,
                      assets=excluded.assets, file_path=excluded.file_path,
-                     updated_at=excluded.updated_at""",
+                     updated_at=excluded.updated_at,
+                     date=excluded.date""",
                 (
                     p["id"], p["name"], p.get("category"), p.get("supplier"),
                     p.get("link"), p.get("unit", "each"), p.get("unit_cost_cents"),
@@ -255,7 +282,7 @@ class DB:
                     json.dumps(p.get("tags") or []),
                     json.dumps(p.get("assets") or []),
                     p["file_path"], p["created_at"], p["updated_at"],
-                    p.get("created_by"),
+                    p.get("created_by"), p.get("date"),
                 ),
             )
             c.execute("DELETE FROM part_tags WHERE part_id=?", (p["id"],))
@@ -314,24 +341,22 @@ class DB:
 
     @staticmethod
     def _row_to_part(r) -> dict:
-        # Defensive: status column may not exist on very old DBs that pre-date
-        # the migration (shouldn't happen since __init__ runs it, but safe).
-        try:
-            status = r["status"]
-        except (KeyError, IndexError):
-            status = None
+        # Defensive against very old DBs that pre-date later migrations.
+        def safe(key):
+            try: return r[key]
+            except (KeyError, IndexError): return None
         return {
             "id": r["id"], "name": r["name"], "category": r["category"],
             "supplier": r["supplier"], "link": r["link"], "unit": r["unit"],
             "unit_cost_cents": r["unit_cost_cents"],
             "on_hand": r["on_hand"], "on_order": r["on_order"],
-            "target_min": r["target_min"], "status": status,
+            "target_min": r["target_min"], "status": safe("status"),
             "notes": r["notes"], "image": r["image"],
             "tags": json.loads(r["tags"] or "[]"),
             "assets": json.loads(r["assets"] or "[]"),
             "file_path": r["file_path"],
             "created_at": r["created_at"], "updated_at": r["updated_at"],
-            "created_by": r["created_by"],
+            "created_by": r["created_by"], "date": safe("date"),
         }
 
     def adjust_part_qty(self, part_id: str, on_hand_delta: float = 0,
@@ -555,3 +580,109 @@ class DB:
     def in_transit_orders(self) -> list[dict]:
         events = self.list_events(limit=200, type_="order")
         return [e for e in events if e["status"] in ("placed", "in_transit")]
+
+    # ---- invoices ----
+    def upsert_invoice(self, inv: dict, part_ids: Optional[list[str]] = None) -> None:
+        with self.conn() as c:
+            c.execute(
+                """INSERT INTO invoices
+                   (id,vendor,total_cents,date,notes,author_id,
+                    file_path,assets,created_at,updated_at)
+                   VALUES(?,?,?,?,?,?,?,?,?,?)
+                   ON CONFLICT(id) DO UPDATE SET
+                     vendor=excluded.vendor, total_cents=excluded.total_cents,
+                     date=excluded.date, notes=excluded.notes,
+                     file_path=excluded.file_path, assets=excluded.assets,
+                     updated_at=excluded.updated_at""",
+                (
+                    inv["id"], inv.get("vendor"), inv.get("total_cents"),
+                    inv.get("date"), inv.get("notes", ""), inv.get("author_id"),
+                    inv["file_path"], json.dumps(inv.get("assets") or []),
+                    inv["created_at"], inv["updated_at"],
+                ),
+            )
+            if part_ids is not None:
+                c.execute("DELETE FROM invoice_parts WHERE invoice_id=?", (inv["id"],))
+                for pid in part_ids:
+                    c.execute(
+                        "INSERT OR IGNORE INTO invoice_parts(invoice_id,part_id) VALUES(?,?)",
+                        (inv["id"], pid),
+                    )
+
+    def delete_invoice(self, invoice_id: str) -> None:
+        with self.conn() as c:
+            c.execute("DELETE FROM invoices WHERE id=?", (invoice_id,))
+
+    def list_invoices(
+        self,
+        part_id: Optional[str] = None,
+        vendor: Optional[str] = None,
+        sort: str = "date_desc",
+    ) -> list[dict]:
+        sql = "SELECT * FROM invoices WHERE 1=1"
+        args: list = []
+        if vendor:
+            sql += " AND vendor = ?"
+            args.append(vendor)
+        if part_id:
+            sql += " AND id IN (SELECT invoice_id FROM invoice_parts WHERE part_id = ?)"
+            args.append(part_id)
+        sort_map = {
+            "date_desc": "date DESC NULLS LAST, created_at DESC",
+            "date_asc":  "date ASC NULLS LAST, created_at ASC",
+            "total_desc": "total_cents DESC",
+            "vendor": "vendor COLLATE NOCASE ASC",
+        }
+        sql += f" ORDER BY {sort_map.get(sort, sort_map['date_desc'])}"
+        with self.conn() as c:
+            rows = c.execute(sql, args).fetchall()
+            invoices = [self._row_to_invoice(r) for r in rows]
+            for inv in invoices:
+                inv["part_ids"] = [
+                    pr["part_id"] for pr in c.execute(
+                        "SELECT part_id FROM invoice_parts WHERE invoice_id=?",
+                        (inv["id"],),
+                    ).fetchall()
+                ]
+            return invoices
+
+    def get_invoice(self, invoice_id: str) -> Optional[dict]:
+        with self.conn() as c:
+            r = c.execute("SELECT * FROM invoices WHERE id=?", (invoice_id,)).fetchone()
+            if not r:
+                return None
+            inv = self._row_to_invoice(r)
+            inv["part_ids"] = [
+                pr["part_id"] for pr in c.execute(
+                    "SELECT part_id FROM invoice_parts WHERE invoice_id=?",
+                    (invoice_id,),
+                ).fetchall()
+            ]
+            return inv
+
+    def invoices_for_part(self, part_id: str) -> list[dict]:
+        return self.list_invoices(part_id=part_id, sort="date_desc")
+
+    @staticmethod
+    def _row_to_invoice(r) -> dict:
+        return {
+            "id": r["id"], "vendor": r["vendor"],
+            "total_cents": r["total_cents"],
+            "date": r["date"], "notes": r["notes"],
+            "author_id": r["author_id"], "file_path": r["file_path"],
+            "assets": json.loads(r["assets"] or "[]"),
+            "created_at": r["created_at"], "updated_at": r["updated_at"],
+        }
+
+    def invoice_count(self) -> int:
+        with self.conn() as c:
+            return c.execute("SELECT COUNT(*) AS n FROM invoices").fetchone()["n"]
+
+    def vendors(self) -> list[str]:
+        with self.conn() as c:
+            rows = c.execute(
+                "SELECT vendor, COUNT(*) AS n FROM invoices "
+                "WHERE vendor IS NOT NULL AND vendor != '' "
+                "GROUP BY vendor ORDER BY n DESC, vendor ASC"
+            ).fetchall()
+            return [r["vendor"] for r in rows]

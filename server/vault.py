@@ -188,6 +188,83 @@ class Vault:
             if r:
                 yield r
 
+    # ----- invoices -----
+    @property
+    def invoices_dir(self) -> Path:
+        d = self.root / "invoices"
+        d.mkdir(parents=True, exist_ok=True)
+        return d
+
+    def invoice_path(self, invoice_id: str, vendor: Optional[str],
+                     date: Optional[str]) -> Path:
+        slug = slugify(vendor or "invoice", 40)
+        date_part = (date or "").replace("/", "-") or "undated"
+        return self.invoices_dir / f"{date_part}_{slug}_{invoice_id[:6]}.md"
+
+    def write_invoice(self, inv: dict, part_ids: list[str]) -> Path:
+        fm = {
+            "id": inv["id"],
+            "vendor": inv.get("vendor") or "",
+            "total_cents": inv.get("total_cents"),
+            "date": inv.get("date") or "",
+            "author": inv.get("author_name") or "",
+            "author_id": inv.get("author_id") or "",
+            "created": inv["created_at"], "updated": inv["updated_at"],
+            "parts": list(part_ids or []),
+            "assets": list(inv.get("assets") or []),
+        }
+        front = yaml.safe_dump(fm, sort_keys=False, allow_unicode=True).strip()
+        body = inv.get("notes") or ""
+        text = f"---\n{front}\n---\n\n{body}\n"
+        path = inv.get("file_path")
+        path = (self.root / path) if path else self.invoice_path(
+            inv["id"], inv.get("vendor"), inv.get("date")
+        )
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text, encoding="utf-8")
+        return path
+
+    def delete_invoice(self, file_path: str) -> None:
+        p = self.root / file_path
+        if p.exists():
+            p.unlink()
+
+    def read_invoice(self, path: Path) -> Optional[dict]:
+        try:
+            text = path.read_text(encoding="utf-8")
+        except OSError:
+            return None
+        m = FRONT_RE.match(text)
+        if not m:
+            return None
+        try:
+            fm = yaml.safe_load(m.group(1)) or {}
+        except yaml.YAMLError:
+            return None
+        if not fm.get("id"):
+            return None
+        rel = path.relative_to(self.root).as_posix()
+        return {
+            "id": str(fm["id"]),
+            "vendor": fm.get("vendor") or None,
+            "total_cents": fm.get("total_cents"),
+            "date": fm.get("date") or None,
+            "notes": m.group(2).strip(),
+            "author_id": fm.get("author_id") or "",
+            "author_name": fm.get("author") or "",
+            "part_ids": list(fm.get("parts") or []),
+            "assets": list(fm.get("assets") or []),
+            "file_path": rel,
+            "created_at": fm.get("created") or "",
+            "updated_at": fm.get("updated") or fm.get("created") or "",
+        }
+
+    def iter_invoices(self) -> Iterable[dict]:
+        for p in self.invoices_dir.rglob("*.md"):
+            r = self.read_invoice(p)
+            if r:
+                yield r
+
     # ----- assets -----
     def _asset_target(self, original_name: str, when: datetime) -> Path:
         sub = when.strftime("%Y/%m/%d")

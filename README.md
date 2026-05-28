@@ -5,7 +5,7 @@ Sibling to [Thymeline](https://github.com/aryasgit/thymeline) — same editorial
 design system, same architecture, different domain.
 
 ```
-every part. every order. every dollar.
+every part. every order. every INR.
 ```
 
 Tracks parts, orders, arrivals, usage, and money. Single binary'ish:

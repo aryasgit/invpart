@@ -7,7 +7,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600&family=Inter+Tight:wght@200;300;400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="/static/app.css?v=4">
+  <link rel="stylesheet" href="/static/app.css?v=8">
 </head>
 <body>
 
@@ -34,6 +34,7 @@
     <button class="tab on" data-tab="stock">Stock <span class="tab-n" id="tabnStock"></span></button>
     <button class="tab" data-tab="activity">Activity <span class="tab-n" id="tabnActivity"></span></button>
     <button class="tab" data-tab="pending">Pending <span class="tab-n" id="tabnPending"></span></button>
+    <button class="tab" data-tab="invoices">Invoices <span class="tab-n" id="tabnInvoices"></span></button>
     <button class="tab" data-tab="spend">Spend <span class="tab-n" id="tabnSpend"></span></button>
   </div>
 </nav>
@@ -45,7 +46,7 @@
       <div class="cap">Inventory</div>
       <h1 class="tight" id="heroTitle">
         Every part. Every <span class="ul">order.</span>
-        <span class="lite">Every dollar.</span>
+        <span class="lite">Every INR.</span>
       </h1>
       <div class="hero-sub dim">
         Track stock. Log purchases. Know what's in transit. Don't lose receipts.
@@ -108,22 +109,42 @@
 
 <!-- ============== PENDING TAB ============== -->
 <section class="pane" data-pane="pending">
-  <div class="wrap pending-grid">
-    <div>
-      <div class="cap" style="margin-bottom:.8rem">In transit</div>
-      <div id="inTransit"></div>
-      <div id="inTransitEmpty" class="empty" hidden>
-        <p class="tight" style="font-size:1.2rem">Nothing ordered.</p>
-        <div class="dim">When you place an order, it shows here until you mark it received.</div>
+  <div class="wrap">
+    <div class="cap" style="margin-bottom:.8rem">Yet to place</div>
+    <div id="reorderList"></div>
+    <div id="reorderEmpty" class="empty" hidden>
+      <p class="tight" style="font-size:1.2rem">Nothing yet to place.</p>
+      <div class="dim">Parts you flag as <span class="part-status s-to_order" style="margin-left:0">Yet to place</span> show up here.</div>
+    </div>
+  </div>
+</section>
+
+<!-- ============== INVOICES TAB ============== -->
+<section class="pane" data-pane="invoices">
+  <div class="wrap">
+    <div class="actbar">
+      <button class="pill" id="openInvoiceAdd">＋ Add invoice</button>
+      <div class="actbar-sub">
+        <div class="filt">
+          <input id="invSearchInput" class="search" placeholder="search vendor or notes…" />
+        </div>
+        <div class="filt-cat" id="invVendorFilters"></div>
+        <select id="invSortSelect" class="select mono">
+          <option value="date_desc">newest first</option>
+          <option value="date_asc">oldest first</option>
+          <option value="total_desc">highest total</option>
+          <option value="vendor">vendor A→Z</option>
+        </select>
       </div>
     </div>
-    <div>
-      <div class="cap" style="margin-bottom:.8rem">Reorder list</div>
-      <div id="reorderList"></div>
-      <div id="reorderEmpty" class="empty" hidden>
-        <p class="tight" style="font-size:1.2rem">All stocked.</p>
-        <div class="dim">Parts whose count falls below their reorder threshold appear here.</div>
-      </div>
+    <div class="feed-head">
+      <div class="cap" id="invCount">0 invoices</div>
+      <div class="feed-active" id="invActive"></div>
+    </div>
+    <div id="invoicesList"></div>
+    <div id="invoicesEmpty" class="empty" hidden>
+      <div class="cap dim">Nothing yet</div>
+      <p class="tight">Drop a PDF or photo of an invoice, pick which parts it covers, save.</p>
     </div>
   </div>
 </section>
@@ -196,7 +217,7 @@
             <option value="g">g</option>
           </select>
         </label>
-        <label class="field"><span class="cap">Unit cost ($)</span>
+        <label class="field"><span class="cap">Unit cost (₹)</span>
           <input name="unit_cost" type="number" step="0.01" placeholder="0.00" />
         </label>
         <label class="field"><span class="cap">On hand</span>
@@ -209,6 +230,9 @@
             <option value="ordered">Order placed</option>
             <option value="in_transit">In transit</option>
           </select>
+        </label>
+        <label class="field"><span class="cap">Date <span class="dim">acquired / bought</span></span>
+          <input name="date" type="date" />
         </label>
         <label class="field f-wide"><span class="cap">Tags <span class="dim">type new or click existing</span></span>
           <input name="tags" list="tagSuggest" placeholder="actuator, dynamixel" />
@@ -228,6 +252,52 @@
         <div class="row-actions">
           <button type="button" class="link" id="cancelPart">cancel</button>
           <button type="submit" class="pill" id="savePart">save part →</button>
+        </div>
+      </div>
+    </form>
+  </div>
+</div>
+
+<!-- ============== INVOICE DIALOG (add + edit) ============== -->
+<div class="dialog" id="invoiceDialog" hidden>
+  <div class="dialog-card dialog-wide">
+    <div class="cap" id="invoiceDialogKind">Add invoice</div>
+    <h3 class="tight" id="invoiceDialogTitle">New invoice.</h3>
+    <form id="invoiceForm" autocomplete="off">
+      <input type="hidden" name="id" />
+      <div class="fgrid">
+        <label class="field f-wide"><span class="cap">Vendor</span>
+          <input name="vendor" list="vendorSuggest" placeholder="Robu / Amazon / Robokits / …" />
+          <datalist id="vendorSuggest"></datalist>
+        </label>
+        <label class="field"><span class="cap">Date</span>
+          <input name="date" type="date" />
+        </label>
+        <label class="field"><span class="cap">Total (₹)</span>
+          <input name="total" type="number" step="0.01" placeholder="0.00" />
+        </label>
+        <label class="field f-wide"><span class="cap">Notes</span>
+          <textarea name="notes" rows="2" placeholder="GST, payment method, anything"></textarea>
+        </label>
+        <label class="field f-wide"><span class="cap">Invoice file <span class="dim">PDF or photo</span></span>
+          <input name="files" type="file" multiple accept="application/pdf,image/*" />
+          <div class="existing-assets" id="invoiceExistingAssets" hidden></div>
+        </label>
+        <div class="field f-wide">
+          <span class="cap">Parts this invoice covers <span class="dim">click to toggle</span></span>
+          <div class="picker">
+            <input id="partPickerSearch" class="picker-search" placeholder="filter parts…" />
+            <div id="partPickerSelected" class="picker-selected"></div>
+            <div id="partPickerList" class="picker-list"></div>
+          </div>
+        </div>
+      </div>
+      <div class="addform-foot">
+        <div class="mono cap dim"><kbd>⌘</kbd><kbd>↵</kbd> save · <kbd>esc</kbd> cancel</div>
+        <div class="row-actions">
+          <button type="button" class="link danger" id="deleteInvoice" hidden>delete</button>
+          <button type="button" class="link" id="cancelInvoice">cancel</button>
+          <button type="submit" class="pill" id="saveInvoice">save invoice →</button>
         </div>
       </div>
     </form>
@@ -282,7 +352,7 @@
         <label class="field"><span class="cap">Quantity</span>
           <input name="qty" type="number" step="0.01" min="0" required />
         </label>
-        <label class="field" id="costField"><span class="cap">Unit cost ($)</span>
+        <label class="field" id="costField"><span class="cap">Unit cost (₹)</span>
           <input name="unit_cost" type="number" step="0.01" placeholder="0.00" />
         </label>
         <label class="field f-wide" id="supplierField"><span class="cap">Supplier</span>
@@ -312,6 +382,6 @@
 <!-- ============== TOAST ============== -->
 <div id="toast" class="toast"></div>
 
-<script src="/static/app.js?v=4"></script>
+<script src="/static/app.js?v=8"></script>
 </body>
 </html>

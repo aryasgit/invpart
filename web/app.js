@@ -10,14 +10,20 @@ const state = {
   ownerSet: false,
   parts: [],
   events: [],
+  invoices: [],
   stats: {},
   pending: { in_transit: [], reorder: [] },
   categories: [],
   tagNames: [],
-  filter: { tab: 'stock', q: '', category: null, sort: 'name', evtType: null },
+  vendors: [],
+  filter: { tab: 'stock', q: '', category: null, sort: 'name', evtType: null,
+            invQ: '', invVendor: null, invSort: 'date_desc' },
   openParts: new Set(),
   openEvents: new Set(),
+  openInvoices: new Set(),
+  partInvoicesCache: new Map(),  // part_id → invoices (loaded on expand)
   partDialog: { mode: 'add', editingId: null, pickedTags: new Set(), pickedCat: null, existingAssets: [], removedAssets: new Set() },
+  invoiceDialog: { mode: 'add', editingId: null, pickedParts: new Set(), existingAssets: [], pickerFilter: '' },
 };
 
 const $ = (sel, root = document) => root.querySelector(sel);
@@ -52,11 +58,14 @@ function fmtBytes(n) {
 
 function fmtMoney(cents, { compact = false } = {}) {
   if (cents == null || isNaN(cents)) return '—';
-  const dollars = cents / 100;
-  if (compact && Math.abs(dollars) >= 1000) {
-    return '$' + (dollars / 1000).toFixed(1) + 'k';
+  const rupees = cents / 100;
+  if (compact) {
+    const abs = Math.abs(rupees);
+    if (abs >= 10000000) return '₹' + (rupees / 10000000).toFixed(2) + 'Cr';
+    if (abs >= 100000)   return '₹' + (rupees / 100000).toFixed(2)   + 'L';
+    if (abs >= 1000)     return '₹' + (rupees / 1000).toFixed(1)     + 'k';
   }
-  return '$' + dollars.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  return '₹' + rupees.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 }
 
 function fmtQty(n, unit) {
@@ -132,6 +141,7 @@ async function boot() {
   bindGlobal();
   bindTheme();
   bindPartDialog();
+  bindInvoiceDialog();
   bindActDialog();
   bindInvite();
   bindBootstrap();
@@ -161,13 +171,14 @@ async function boot() {
 }
 
 async function refreshAll() {
-  const [parts, events, stats, members, pending, tags] = await Promise.all([
+  const [parts, events, stats, members, pending, tags, invoices] = await Promise.all([
     api('/api/parts?' + partsQuery()),
     api('/api/events?limit=200'),
     api('/api/stats'),
     api('/api/members'),
     api('/api/pending'),
     api('/api/tags'),
+    api('/api/invoices?' + invoicesQuery()),
   ]);
   state.parts = parts.parts;
   state.events = events.events;
@@ -176,6 +187,23 @@ async function refreshAll() {
   state.pending = pending;
   state.categories = stats.categories || [];
   state.tagNames = tags.tag_names || [];
+  state.vendors = tags.vendors || [];
+  state.invoices = invoices.invoices;
+  state.partInvoicesCache.clear();
+}
+
+function invoicesQuery() {
+  const p = new URLSearchParams();
+  if (state.filter.invVendor) p.set('vendor', state.filter.invVendor);
+  if (state.filter.invSort) p.set('sort', state.filter.invSort);
+  return p.toString();
+}
+
+async function refreshInvoices() {
+  const r = await api('/api/invoices?' + invoicesQuery());
+  state.invoices = r.invoices;
+  state.partInvoicesCache.clear();
+  renderInvoices();
 }
 
 function partsQuery() {
@@ -225,6 +253,7 @@ function renderAll() {
   renderParts();
   renderActivity();
   renderPending();
+  renderInvoices();
   renderSpend();
   renderFooter();
 }
@@ -248,15 +277,16 @@ function renderHeroStats() {
 
   const items = [
     { num: fmtMoney(spent,   { compact: true }), lbl: 'total spent',
-      sub: 'in stock · in transit · placed' },
+      sub: 'in house · in transit · placed' },
     { num: fmtMoney(planned, { compact: true }), lbl: 'planned expenses',
-      sub: 'yet to be placed' },
+      sub: 'yet to be placed · not in total' },
     { num: fmtMoney(remain,  { compact: true }), lbl: 'remaining balance',
       sub: `of ${fmtMoney(budget, { compact: true })}` },
     { num: fmtMoney(budget,  { compact: true }), lbl: 'budget',
-      sub: state.pending.reorder.length
-        ? `${state.pending.reorder.length} parts to order`
-        : 'all flagged' },
+      sub: (() => {
+        const n = (state.parts || []).filter(p => p.status === 'to_order').length;
+        return n ? `${n} parts to order` : 'no pending orders';
+      })() },
   ];
   $('#bigStats').innerHTML = items.map(it => `
     <div class="bigstat">
@@ -270,8 +300,10 @@ function renderHeroStats() {
 function renderTabCounts() {
   $('#tabnStock').textContent = state.stats.parts ?? '';
   $('#tabnActivity').textContent = state.events.length ?? '';
-  const p = (state.pending.in_transit?.length || 0) + (state.pending.reorder?.length || 0);
-  $('#tabnPending').textContent = p ? p : '';
+  // Pending count = parts flagged "Yet to place" (status=to_order)
+  const toOrderCount = (state.parts || []).filter(p => p.status === 'to_order').length;
+  $('#tabnPending').textContent = toOrderCount ? toOrderCount : '';
+  $('#tabnInvoices').textContent = state.stats.invoices ?? state.invoices.length ?? '';
   $('#tabnSpend').textContent = state.stats.total_spent_cents
     ? fmtMoney(state.stats.total_spent_cents, { compact: true }) : '';
 }
@@ -341,9 +373,10 @@ function renderParts() {
 }
 
 const STATUS_LABEL = {
-  to_order: 'Yet to place',
-  ordered: 'Order placed',
+  to_order:   'Yet to place',
+  ordered:    'Order placed',
   in_transit: 'In transit',
+  in_house:   'In house',         // synthetic — derived from on_hand>0 + status null
 };
 
 function renderPartRow(p) {
@@ -353,9 +386,16 @@ function renderPartRow(p) {
   const thumb = imgUrl
     ? `<img src="${escapeHtml(imgUrl)}" alt="">`
     : `${escapeHtml(thumbInitials(p.name))}`;
-  const statusBadge = p.status && STATUS_LABEL[p.status]
-    ? `<span class="part-status s-${escapeHtml(p.status)}">${escapeHtml(STATUS_LABEL[p.status])}</span>`
-    : '';
+  // Pick the right badge:
+  //   - explicit status takes precedence (to_order / ordered / in_transit)
+  //   - else if stocked (on_hand > 0)  → "In house" (green)
+  //   - else                            → no badge
+  let statusBadge = '';
+  if (p.status && STATUS_LABEL[p.status]) {
+    statusBadge = `<span class="part-status s-${escapeHtml(p.status)}">${escapeHtml(STATUS_LABEL[p.status])}</span>`;
+  } else if ((p.on_hand || 0) > 0) {
+    statusBadge = `<span class="part-status s-in_house">In house</span>`;
+  }
   return `
     <div class="part" data-id="${escapeHtml(p.id)}">
       <div class="part-head">
@@ -404,8 +444,13 @@ function renderPartBody(el) {
         ${p.link ? `<a class="part-link" href="${escapeHtml(p.link)}" target="_blank">↗ supplier page</a>` : ''}
         ${(p.tags || []).length ? `<div class="part-tags">${p.tags.map(t => `<span class="t" data-tag="${escapeHtml(t)}">#${escapeHtml(t)}</span>`).join('')}</div>` : ''}
         ${assets ? `<div class="part-section-cap" style="margin-top:1.5rem">Files</div><div class="part-assets">${assets}</div>` : ''}
+        <div class="part-section-cap" style="margin-top:1.5rem">Invoices</div>
+        <div class="part-invoices" data-part-invoices="${escapeHtml(p.id)}">
+          <div class="dim mono cap" style="padding:.6rem 0">loading…</div>
+        </div>
         <div class="part-meta">
-          <span>reorder at ${p.target_min || 0}</span>
+          <span>planned ${p.target_min || 0}</span>
+          ${p.date ? `<span>date ${escapeHtml(p.date)}</span>` : ''}
           <span>updated ${new Date(p.updated_at).toLocaleString()}</span>
           <span>id ${p.id.slice(0,6)}</span>
         </div>
@@ -430,6 +475,55 @@ function renderPartBody(el) {
     $('#searchInput').value = state.filter.q;
     renderPartsActive(); refreshParts();
   }));
+  loadPartInvoices(p.id, body);
+}
+
+async function loadPartInvoices(partId, body) {
+  const slot = body.querySelector(`[data-part-invoices="${CSS.escape(partId)}"]`);
+  if (!slot) return;
+  // Cache to avoid re-fetching on every collapse/expand
+  let list = state.partInvoicesCache.get(partId);
+  if (!list) {
+    try {
+      // Use the already-fetched state.invoices and filter — cheaper than another HTTP call
+      list = state.invoices.filter(inv =>
+        (inv.parts || []).some(p => p.id === partId)
+      );
+      state.partInvoicesCache.set(partId, list);
+    } catch (err) {
+      slot.innerHTML = `<div class="dim mono cap" style="padding:.6rem 0">load failed</div>`;
+      return;
+    }
+  }
+  if (!list.length) {
+    slot.innerHTML = `<div class="dim mono cap" style="padding:.6rem 0">no invoices linked yet</div>`;
+    return;
+  }
+  slot.innerHTML = list.map(inv => `
+    <div class="pi" data-invoice-id="${escapeHtml(inv.id)}">
+      <span class="d">${escapeHtml(inv.date || '—')}</span>
+      <span class="v">${escapeHtml(inv.vendor || '(no vendor)')}${inv.assets?.length ? ` <span class="dim">· ${inv.assets.length} file${inv.assets.length === 1 ? '' : 's'}</span>` : ''}</span>
+      <span class="t">${inv.total_cents != null ? fmtMoney(inv.total_cents) : '—'}</span>
+    </div>
+  `).join('');
+  // Clicking an invoice row jumps to the invoices tab and opens it
+  $$('.pi', slot).forEach(row => {
+    row.addEventListener('click', (ev) => {
+      ev.stopPropagation();
+      const iid = row.dataset.invoiceId;
+      switchTab('invoices');
+      // Open the invoice card
+      state.openInvoices.add(iid);
+      setTimeout(() => {
+        const card = document.querySelector(`.invoice[data-id="${iid}"]`);
+        if (card) {
+          card.classList.add('open');
+          lazyLoadInvoiceBody(card);
+          card.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        }
+      }, 50);
+    });
+  });
 }
 
 function renderActivity() {
@@ -541,50 +635,416 @@ function renderEventBody(el) {
 }
 
 function renderPending() {
-  const inT = $('#inTransit');
-  const inTE = $('#inTransitEmpty');
+  // Pending tab is now exclusively the "Yet to place" list — parts the user
+  // has flagged with status=to_order. Anything not in that bucket is hidden.
   const re = $('#reorderList');
   const reE = $('#reorderEmpty');
-  const orders = state.pending.in_transit || [];
-  const reorder = state.pending.reorder || [];
+  const toOrder = (state.parts || []).filter(p => p.status === 'to_order');
 
-  if (!orders.length) { inT.innerHTML = ''; inTE.hidden = false; }
-  else {
-    inTE.hidden = true;
-    inT.innerHTML = orders.map(e => {
-      const items = (e.lines || []).map(l => `<span class="qty">${l.qty}×</span>${escapeHtml(l.part_name || '?')}`).join(' · ');
-      return `
-        <div class="transit-card">
-          <div class="info">
-            <div class="sup tight">${escapeHtml(e.supplier || 'Order')}</div>
-            <div class="eta">placed ${escapeHtml(new Date(e.created_at).toLocaleDateString())} ${e.expected_arrival ? `· eta ${escapeHtml(e.expected_arrival)}` : ''}</div>
-            <div class="items">${items || '—'}</div>
-            ${e.tracking_url ? `<a class="link" href="${escapeHtml(e.tracking_url)}" target="_blank" style="margin-top:.35rem; align-self:flex-start">track →</a>` : ''}
-          </div>
-          <div class="right">
-            <div class="cost">${e.cost_cents != null ? fmtMoney(e.cost_cents) : ''}</div>
-            <button class="pill sm" data-act="receive" data-id="${escapeHtml(e.id)}">mark received</button>
-          </div>
-        </div>`;
-    }).join('');
-    $$('#inTransit [data-act="receive"]').forEach(b => b.addEventListener('click', onEventAction));
+  if (!toOrder.length) {
+    re.innerHTML = '';
+    reE.hidden = false;
+    return;
   }
+  reE.hidden = true;
 
-  if (!reorder.length) { re.innerHTML = ''; reE.hidden = false; }
-  else {
-    reE.hidden = true;
-    re.innerHTML = reorder.map(p => `
+  // Sort by total planned cost descending — biggest line items at the top.
+  toOrder.sort((a, b) => {
+    const ac = (a.unit_cost_cents || 0) * Math.max(a.target_min || 0, 1);
+    const bc = (b.unit_cost_cents || 0) * Math.max(b.target_min || 0, 1);
+    return bc - ac;
+  });
+
+  re.innerHTML = toOrder.map(p => {
+    const planQty = p.target_min || 1;
+    const total = (p.unit_cost_cents || 0) * planQty;
+    return `
       <div class="reorder-row">
         <div class="nm tight">${escapeHtml(p.name)}
-          ${p.supplier ? `<span class="sup">${escapeHtml(p.supplier)}</span>` : ''}
+          ${p.supplier ? `<span class="sup">${escapeHtml(p.supplier)}${p.category ? ' · ' + escapeHtml(p.category) : ''}</span>` : (p.category ? `<span class="sup">${escapeHtml(p.category)}</span>` : '')}
         </div>
-        <div class="qty">${p.on_hand} <span class="tgt">/ ${p.target_min}</span></div>
+        <div class="qty"><span style="color:var(--text)">${planQty}</span> <span class="tgt">planned · ${total ? fmtMoney(total, { compact: true }) : '—'}</span></div>
         <button class="pill sm ghost" data-act="order" data-id="${escapeHtml(p.id)}">order +</button>
       </div>
-    `).join('');
-    $$('#reorderList [data-act="order"]').forEach(b => b.addEventListener('click', (e) => {
-      openActDialog(e.currentTarget.dataset.id, 'order');
-    }));
+    `;
+  }).join('');
+  $$('#reorderList [data-act="order"]').forEach(b => b.addEventListener('click', (e) => {
+    openActDialog(e.currentTarget.dataset.id, 'order');
+  }));
+}
+
+// ====================== invoices ======================
+
+function renderInvoices() {
+  const list = $('#invoicesList');
+  const empty = $('#invoicesEmpty');
+  // Apply client-side filters (vendor / sort handled by API, q done here)
+  const q = state.filter.invQ.toLowerCase().trim();
+  let rows = state.invoices.slice();
+  if (q) {
+    rows = rows.filter(i =>
+      (i.vendor || '').toLowerCase().includes(q) ||
+      (i.notes  || '').toLowerCase().includes(q) ||
+      (i.parts || []).some(p => (p.name || '').toLowerCase().includes(q))
+    );
+  }
+  $('#invCount').textContent = `${rows.length} invoice${rows.length === 1 ? '' : 's'}`;
+  renderInvoiceVendorFilter();
+  renderInvoiceActive();
+
+  if (!rows.length) {
+    list.innerHTML = '';
+    empty.hidden = false;
+    return;
+  }
+  empty.hidden = true;
+
+  list.innerHTML = rows.map(i => {
+    const parts = (i.parts || []).map(p => p.name).join(' · ') || '—';
+    const fileCount = (i.assets || []).length;
+    return `
+      <div class="invoice" data-id="${escapeHtml(i.id)}">
+        <div class="invoice-head">
+          <div class="i-date">${escapeHtml(i.date || '—')}</div>
+          <div class="i-vendor tight">${escapeHtml(i.vendor || '(no vendor)')}</div>
+          <div class="i-parts" title="${escapeHtml(parts)}">${escapeHtml(parts)}</div>
+          <div class="i-total">${i.total_cents != null ? fmtMoney(i.total_cents) : '—'}</div>
+          <div class="i-files">${fileCount ? fileCount + (fileCount === 1 ? ' file' : ' files') : ''}</div>
+          <div class="i-arrow">→</div>
+        </div>
+        <div class="invoice-body" data-loaded="0"></div>
+      </div>
+    `;
+  }).join('');
+
+  $$('.invoice', list).forEach(el => {
+    el.addEventListener('click', (ev) => {
+      if (ev.target.closest('a, button, .act')) return;
+      const id = el.dataset.id;
+      if (state.openInvoices.has(id)) state.openInvoices.delete(id);
+      else state.openInvoices.add(id);
+      el.classList.toggle('open');
+      lazyLoadInvoiceBody(el);
+    });
+    if (state.openInvoices.has(el.dataset.id)) {
+      el.classList.add('open');
+      lazyLoadInvoiceBody(el);
+    }
+  });
+}
+
+function lazyLoadInvoiceBody(el) {
+  const body = $('.invoice-body', el);
+  if (body.dataset.loaded === '1') return;
+  const i = state.invoices.find(x => x.id === el.dataset.id);
+  if (!i) return;
+  body.dataset.loaded = '1';
+
+  const partsList = (i.parts || []).map(p => `
+    <div class="ipl">
+      <span>${escapeHtml(p.name)}</span>
+      <span class="cat">${escapeHtml(p.category || '')}</span>
+    </div>
+  `).join('') || '<div class="dim mono cap" style="padding:.6rem 0">no parts linked</div>';
+
+  const assets = (i.assets || []).map(a => {
+    const isImg = /\.(png|jpe?g|gif|webp|bmp|avif|svg)$/i.test(a.path);
+    const url = '/' + a.path.replace(/^\/+/, '');
+    if (isImg) return `<a href="${escapeHtml(url)}" target="_blank"><img loading="lazy" src="${escapeHtml(url)}" alt=""></a>`;
+    return `<a href="${escapeHtml(url)}" target="_blank" class="file">
+      <span class="ext">${escapeHtml(fileExt(a.name) || 'file')}</span>
+      <span class="fname">${escapeHtml(a.name)}</span>
+      <span class="fsize">${escapeHtml(fmtBytes(a.size))}</span>
+    </a>`;
+  }).join('');
+
+  const canEdit = true;
+  body.innerHTML = `
+    <div class="invoice-body-inner">
+      <div>
+        <div class="part-section-cap">Parts on this invoice</div>
+        <div class="invoice-parts-list">${partsList}</div>
+        ${i.notes ? `<div class="part-section-cap" style="margin-top:1.5rem">Notes</div>
+                     <div class="invoice-notes">${escapeHtml(i.notes)}</div>` : ''}
+        ${assets ? `<div class="part-section-cap" style="margin-top:1.5rem">Files</div>
+                    <div class="part-assets">${assets}</div>` : ''}
+        <div class="invoice-meta">
+          <span>created ${escapeHtml(new Date(i.created_at).toLocaleString())}</span>
+          <span>id ${escapeHtml(i.id.slice(0, 6))}</span>
+          ${canEdit ? `<span class="meta-actions">
+            <span class="act" data-act="edit" data-id="${escapeHtml(i.id)}">edit</span>
+            <span class="act danger" data-act="del" data-id="${escapeHtml(i.id)}">delete</span>
+          </span>` : ''}
+        </div>
+      </div>
+      <div>
+        <div class="part-section-cap">Summary</div>
+        <div class="bigstat" style="margin-bottom:.5rem">
+          <div class="num">${i.total_cents != null ? fmtMoney(i.total_cents) : '—'}</div>
+          <div class="lbl">total</div>
+        </div>
+        <div class="part-meta" style="border-top:0; padding-top:0; margin-top:.5rem">
+          <span>vendor ${escapeHtml(i.vendor || '—')}</span>
+          <span>date ${escapeHtml(i.date || '—')}</span>
+        </div>
+      </div>
+    </div>
+  `;
+  $$('.act', body).forEach(b => b.addEventListener('click', onInvoiceAction));
+}
+
+function renderInvoiceVendorFilter() {
+  const box = $('#invVendorFilters');
+  if (!state.vendors.length) { box.innerHTML = ''; return; }
+  box.innerHTML = state.vendors.slice(0, 10).map(v => `
+    <button class="c ${state.filter.invVendor === v ? 'on' : ''}" data-vendor="${escapeHtml(v)}">${escapeHtml(v)}</button>
+  `).join('');
+  $$('button.c', box).forEach(b => {
+    b.addEventListener('click', () => {
+      const v = b.dataset.vendor;
+      state.filter.invVendor = state.filter.invVendor === v ? null : v;
+      renderInvoiceVendorFilter();
+      refreshInvoices();
+    });
+  });
+}
+
+function renderInvoiceActive() {
+  const f = state.filter;
+  const bits = [];
+  if (f.invVendor) bits.push(`vendor: ${f.invVendor}`);
+  if (f.invQ) bits.push(`"${f.invQ}"`);
+  const box = $('#invActive');
+  if (!bits.length) { box.innerHTML = ''; return; }
+  box.innerHTML = `${escapeHtml(bits.join(' · '))} <span class="clear" id="clearInvFilters">clear</span>`;
+  $('#clearInvFilters').addEventListener('click', () => {
+    state.filter.invQ = ''; state.filter.invVendor = null;
+    $('#invSearchInput').value = '';
+    renderInvoiceVendorFilter(); renderInvoiceActive();
+    refreshInvoices();
+  });
+}
+
+async function onInvoiceAction(ev) {
+  ev.preventDefault(); ev.stopPropagation();
+  const b = ev.currentTarget;
+  const id = b.dataset.id;
+  const act = b.dataset.act;
+  const i = state.invoices.find(x => x.id === id);
+  if (!i) return;
+  if (act === 'edit') { openInvoiceDialog(i); return; }
+  if (act === 'del') {
+    if (!confirm('Delete this invoice? The .md file will be removed; attached PDFs stay on disk.')) return;
+    try {
+      await api(`/api/invoices/${id}`, { method: 'DELETE' });
+      state.openInvoices.delete(id);
+      await refreshAll(); renderAll();
+      toast('deleted');
+    } catch (err) { toast('failed: ' + err.message, 'err'); }
+  }
+}
+
+function openInvoiceDialog(invoice) {
+  const dlg = $('#invoiceDialog');
+  const form = $('#invoiceForm');
+  form.reset();
+  state.invoiceDialog.pickerFilter = '';
+
+  if (invoice) {
+    state.invoiceDialog.mode = 'edit';
+    state.invoiceDialog.editingId = invoice.id;
+    $('#invoiceDialogKind').textContent = 'Edit invoice';
+    $('#invoiceDialogTitle').textContent = invoice.vendor || 'Invoice';
+    $('#saveInvoice').textContent = 'save changes →';
+    $('#deleteInvoice').hidden = false;
+    form.elements.id.value = invoice.id;
+    form.elements.vendor.value = invoice.vendor || '';
+    form.elements.date.value = invoice.date || '';
+    form.elements.total.value = invoice.total_cents != null ? (invoice.total_cents / 100).toFixed(2) : '';
+    form.elements.notes.value = invoice.notes || '';
+    state.invoiceDialog.pickedParts = new Set((invoice.parts || []).map(p => p.id));
+    state.invoiceDialog.existingAssets = invoice.assets || [];
+  } else {
+    state.invoiceDialog.mode = 'add';
+    state.invoiceDialog.editingId = null;
+    $('#invoiceDialogKind').textContent = 'Add invoice';
+    $('#invoiceDialogTitle').textContent = 'New invoice.';
+    $('#saveInvoice').textContent = 'save invoice →';
+    $('#deleteInvoice').hidden = true;
+    state.invoiceDialog.pickedParts = new Set();
+    state.invoiceDialog.existingAssets = [];
+    // Default date to today
+    form.elements.date.valueAsDate = new Date();
+  }
+
+  // Vendor datalist
+  $('#vendorSuggest').innerHTML = (state.vendors || []).map(v =>
+    `<option value="${escapeHtml(v)}">`).join('');
+
+  renderPartPicker();
+  renderInvoiceExistingAssets();
+  dlg.hidden = false;
+  setTimeout(() => form.elements.vendor.focus(), 30);
+}
+
+function closeInvoiceDialog() {
+  $('#invoiceDialog').hidden = true;
+  $('#invoiceForm').reset();
+  state.invoiceDialog.editingId = null;
+  state.invoiceDialog.pickedParts = new Set();
+  state.invoiceDialog.existingAssets = [];
+  state.invoiceDialog.pickerFilter = '';
+}
+
+function renderPartPicker() {
+  const sel = $('#partPickerSelected');
+  const list = $('#partPickerList');
+  const picked = state.invoiceDialog.pickedParts;
+
+  // Selected chips (from the full state.parts so names resolve)
+  sel.innerHTML = Array.from(picked).map(pid => {
+    const p = state.parts.find(x => x.id === pid);
+    if (!p) return '';
+    return `<span class="chip" data-id="${escapeHtml(pid)}">${escapeHtml(p.name)} <span class="x">×</span></span>`;
+  }).join('');
+  $$('#partPickerSelected .chip .x').forEach(x => x.addEventListener('click', (ev) => {
+    const id = ev.currentTarget.parentElement.dataset.id;
+    picked.delete(id);
+    renderPartPicker();
+  }));
+
+  // Filtered list of all parts
+  const f = state.invoiceDialog.pickerFilter.toLowerCase().trim();
+  const visible = (state.parts || []).filter(p =>
+    !f || p.name.toLowerCase().includes(f) ||
+    (p.supplier || '').toLowerCase().includes(f) ||
+    (p.category || '').toLowerCase().includes(f)
+  );
+  list.innerHTML = visible.map(p => `
+    <div class="row ${picked.has(p.id) ? 'on' : ''}" data-id="${escapeHtml(p.id)}">
+      <span class="box"></span>
+      <span>${escapeHtml(p.name)}</span>
+      <span class="cat">${escapeHtml(p.category || '')}</span>
+    </div>
+  `).join('') || '<div class="dim mono cap" style="padding:.6rem .8rem">no matches</div>';
+
+  $$('#partPickerList .row').forEach(r => {
+    r.addEventListener('click', () => {
+      const id = r.dataset.id;
+      if (picked.has(id)) picked.delete(id); else picked.add(id);
+      renderPartPicker();
+    });
+  });
+}
+
+function renderInvoiceExistingAssets() {
+  const box = $('#invoiceExistingAssets');
+  const items = state.invoiceDialog.existingAssets || [];
+  if (!items.length) { box.hidden = true; box.innerHTML = ''; return; }
+  box.hidden = false;
+  box.innerHTML = items.map(a => {
+    const url = '/' + a.path.replace(/^\/+/, '');
+    return `<a class="ea" href="${escapeHtml(url)}" target="_blank">${escapeHtml(a.name)}</a>`;
+  }).join('');
+}
+
+function bindInvoiceDialog() {
+  $('#openInvoiceAdd').addEventListener('click', () => openInvoiceDialog(null));
+  $('#cancelInvoice').addEventListener('click', closeInvoiceDialog);
+  $('#invoiceDialog').addEventListener('click', (ev) => {
+    if (ev.target === $('#invoiceDialog')) closeInvoiceDialog();
+  });
+  $('#deleteInvoice').addEventListener('click', async () => {
+    const id = state.invoiceDialog.editingId;
+    if (!id) return;
+    if (!confirm('Delete this invoice?')) return;
+    try {
+      await api(`/api/invoices/${id}`, { method: 'DELETE' });
+      state.openInvoices.delete(id);
+      closeInvoiceDialog();
+      await refreshAll(); renderAll();
+      toast('deleted');
+    } catch (err) { toast('failed: ' + err.message, 'err'); }
+  });
+  $('#partPickerSearch').addEventListener('input', (e) => {
+    state.invoiceDialog.pickerFilter = e.target.value;
+    renderPartPicker();
+  });
+  $('#invoiceForm').addEventListener('keydown', (ev) => {
+    if (ev.key === 'Enter' && (ev.metaKey || ev.ctrlKey)) {
+      ev.preventDefault();
+      $('#invoiceForm').requestSubmit();
+    }
+  });
+  $('#invoiceForm').addEventListener('submit', onInvoiceSubmit);
+
+  $('#invSearchInput').addEventListener('input', (e) => {
+    clearTimeout($('#invSearchInput')._h);
+    $('#invSearchInput')._h = setTimeout(() => {
+      state.filter.invQ = e.target.value.trim();
+      renderInvoices();
+    }, 200);
+  });
+  $('#invSortSelect').addEventListener('change', (e) => {
+    state.filter.invSort = e.target.value;
+    refreshInvoices();
+  });
+}
+
+async function onInvoiceSubmit(ev) {
+  ev.preventDefault();
+  const f = ev.target;
+  const submitBtn = $('#saveInvoice');
+  if (submitBtn.disabled) return;
+  submitBtn.disabled = true;
+  try {
+    if (state.invoiceDialog.mode === 'edit') {
+      await submitInvoiceEdit(f);
+    } else {
+      await submitInvoiceCreate(f);
+    }
+    closeInvoiceDialog();
+    await refreshAll(); renderAll();
+    toast(state.invoiceDialog.mode === 'edit' ? 'saved' : 'invoice added');
+  } catch (err) {
+    toast('failed: ' + err.message, 'err');
+  } finally {
+    submitBtn.disabled = false;
+  }
+}
+
+async function submitInvoiceCreate(f) {
+  const fd = new FormData();
+  for (const name of ['vendor', 'total', 'date', 'notes']) {
+    const v = f.elements[name].value;
+    if (v) fd.set(name, v);
+  }
+  fd.set('part_ids', JSON.stringify(Array.from(state.invoiceDialog.pickedParts)));
+  for (const file of f.elements.files.files || []) fd.append('files', file);
+  await apiForm('/api/invoices', fd);
+}
+
+async function submitInvoiceEdit(f) {
+  const id = state.invoiceDialog.editingId;
+  const body = {
+    vendor: f.elements.vendor.value.trim() || null,
+    date:   f.elements.date.value || null,
+    notes:  f.elements.notes.value,
+    part_ids: Array.from(state.invoiceDialog.pickedParts),
+  };
+  const total = f.elements.total.value;
+  if (total) body.total = total;
+  await api(`/api/invoices/${id}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  // Upload any new files
+  const files = f.elements.files.files || [];
+  if (files.length) {
+    const fd = new FormData();
+    for (const file of files) fd.append('files', file);
+    await apiForm(`/api/invoices/${id}/assets`, fd);
   }
 }
 
@@ -597,8 +1057,8 @@ function renderSpend() {
     ? s.remaining_balance_cents : (budget - spent);
 
   const items = [
-    { num: fmtMoney(spent),   lbl: 'total spent',       sub: 'in stock · in transit · placed' },
-    { num: fmtMoney(planned), lbl: 'planned expenses',  sub: 'yet to be placed' },
+    { num: fmtMoney(spent),   lbl: 'total spent',       sub: 'in house · in transit · placed' },
+    { num: fmtMoney(planned), lbl: 'planned expenses',  sub: 'yet to be placed · not in total' },
     { num: fmtMoney(remain),  lbl: 'remaining balance', sub: `of ${fmtMoney(budget)}`,
       neg: remain < 0 },
     { num: fmtMoney(budget),  lbl: 'budget' },
@@ -724,6 +1184,7 @@ function openPartDialog(part) {
       ? (part.unit_cost_cents / 100).toFixed(2) : '';
     form.elements.on_hand.value = part.on_hand ?? 0;
     form.elements.status.value = part.status || '';
+    form.elements.date.value = part.date || '';
     form.elements.tags.value = (part.tags || []).join(', ');
     form.elements.notes.value = part.notes || '';
     state.partDialog.pickedCat = part.category || null;
@@ -849,7 +1310,7 @@ async function onPartSubmit(ev) {
 
 async function submitPartCreate(f) {
   const fd = new FormData();
-  for (const name of ['name','category','supplier','link','unit','on_hand','status','tags','notes']) {
+  for (const name of ['name','category','supplier','link','unit','on_hand','status','date','tags','notes']) {
     const v = f.elements[name]?.value || '';
     if (v) fd.set(name, v);
   }
@@ -870,6 +1331,7 @@ async function submitPartEdit(f) {
     unit: f.elements.unit.value,
     on_hand: parseFloat(f.elements.on_hand.value) || 0,
     status: f.elements.status.value || null,
+    date: f.elements.date.value || null,
     notes: f.elements.notes.value,
     tags: Array.from(parseTagsInput(f.elements.tags.value)),
   };
@@ -1102,9 +1564,9 @@ function bindGlobal() {
       switchTab('stock');
       $('#openAdd').click();
     }
-    // Number keys 1-4 switch tabs
-    if (['1','2','3','4'].includes(ev.key) && !/INPUT|TEXTAREA|SELECT/.test(ev.target.tagName)) {
-      switchTab(['stock','activity','pending','spend'][parseInt(ev.key, 10) - 1]);
+    // Number keys 1-5 switch tabs
+    if (['1','2','3','4','5'].includes(ev.key) && !/INPUT|TEXTAREA|SELECT/.test(ev.target.tagName)) {
+      switchTab(['stock','activity','pending','invoices','spend'][parseInt(ev.key, 10) - 1]);
     }
   });
 }

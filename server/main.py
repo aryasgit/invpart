@@ -100,9 +100,18 @@ def expand_assets(paths: list[str]) -> list[dict]:
     return out
 
 
-def enrich_part(p: dict) -> dict:
+def enrich_part(p: dict, with_invoices: bool = False) -> dict:
     out = dict(p)
     out["assets"] = expand_assets(p.get("assets") or [])
+    if with_invoices:
+        out["invoices"] = [
+            {
+                "id": inv["id"], "vendor": inv.get("vendor"),
+                "date": inv.get("date"), "total_cents": inv.get("total_cents"),
+                "assets": expand_assets(inv.get("assets") or []),
+            }
+            for inv in db.invoices_for_part(p["id"])
+        ]
     return out
 
 
@@ -283,7 +292,7 @@ def get_part(part_id: str, req: Request):
     p = db.get_part(part_id)
     if not p:
         raise HTTPException(404, "not found")
-    return enrich_part(p)
+    return enrich_part(p, with_invoices=True)
 
 
 @app.post("/api/parts")
@@ -298,6 +307,7 @@ async def create_part(
     on_hand: float = Form(0),
     target_min: float = Form(0),
     status: str = Form(""),
+    date: str = Form(""),
     notes: str = Form(""),
     tags: str = Form(""),
     files: list[UploadFile] = File(default=[]),
@@ -341,6 +351,7 @@ async def create_part(
         "on_order": 0,
         "target_min": max(0.0, target_min or 0),
         "status": st,
+        "date": (date or "").strip() or None,
         "notes": notes or "",
         "image": image,
         "tags": tag_list,
@@ -381,6 +392,8 @@ async def update_part(part_id: str, req: Request):
     if "status" in body:
         s = (body["status"] or "").strip().lower() if body["status"] else None
         new["status"] = s if s in PART_STATUSES else None
+    if "date" in body:
+        new["date"] = (body["date"] or "").strip() or None
     if "tags" in body:
         new["tags"] = sorted({str(t).lstrip("#").lower()
                               for t in (body["tags"] or [])})
@@ -433,6 +446,194 @@ def delete_part(part_id: str, req: Request):
         raise HTTPException(403, "owner can delete others' parts")
     vault.delete_part(existing["file_path"])
     db.delete_part(part_id)
+    return {"ok": True}
+
+
+# ---------- invoices ----------
+
+def enrich_invoice(inv: dict) -> dict:
+    """Add resolved part summaries + asset metadata to an invoice."""
+    out = dict(inv)
+    parts: list[dict] = []
+    for pid in inv.get("part_ids") or []:
+        p = db.get_part(pid)
+        if p:
+            parts.append({
+                "id": p["id"], "name": p["name"],
+                "category": p.get("category"),
+                "supplier": p.get("supplier"),
+            })
+    out["parts"] = parts
+    out["assets"] = expand_assets(inv.get("assets") or [])
+    return out
+
+
+def _parse_part_ids(raw: str) -> list[str]:
+    if not raw:
+        return []
+    # Accept JSON array or comma-separated
+    try:
+        v = json.loads(raw)
+        if isinstance(v, list):
+            return [str(x) for x in v if str(x).strip()]
+    except json.JSONDecodeError:
+        pass
+    return [t.strip() for t in raw.split(",") if t.strip()]
+
+
+@app.get("/api/invoices")
+def list_invoices(
+    req: Request,
+    part_id: Optional[str] = None,
+    vendor: Optional[str] = None,
+    sort: str = "date_desc",
+):
+    require_member(req, db)
+    rows = db.list_invoices(part_id=part_id, vendor=vendor, sort=sort)
+    return {"invoices": [enrich_invoice(i) for i in rows]}
+
+
+@app.get("/api/invoices/{invoice_id}")
+def get_invoice(invoice_id: str, req: Request):
+    require_member(req, db)
+    inv = db.get_invoice(invoice_id)
+    if not inv:
+        raise HTTPException(404, "not found")
+    return enrich_invoice(inv)
+
+
+@app.post("/api/invoices")
+async def create_invoice(
+    req: Request,
+    vendor: str = Form(""),
+    total: str = Form(""),                   # Decimal dollars/rupees as string
+    date: str = Form(""),                    # YYYY-MM-DD
+    notes: str = Form(""),
+    part_ids: str = Form(""),                # JSON array or comma-separated
+    files: list[UploadFile] = File(default=[]),
+):
+    me_ = require_member(req, db)
+    vendor_s = (vendor or "").strip() or None
+    date_s = (date or "").strip() or None
+    notes_s = (notes or "").strip()
+    total_cents: Optional[int] = None
+    if total:
+        try:
+            total_cents = int(round(float(total) * 100))
+        except (ValueError, TypeError):
+            raise HTTPException(400, "invalid total")
+    part_id_list = _parse_part_ids(part_ids)
+    # Filter to only existing parts
+    part_id_list = [pid for pid in part_id_list if db.get_part(pid)]
+
+    now = datetime.now(timezone.utc)
+    iso = now.strftime("%Y-%m-%dT%H:%M:%SZ")
+    asset_paths: list[str] = []
+    for f in files or []:
+        if not f.filename:
+            continue
+        rel = await vault.save_asset_stream(f, f.filename, now)
+        full = vault.root / rel
+        if not full.stat().st_size:
+            full.unlink(missing_ok=True); continue
+        asset_paths.append(rel)
+
+    iid = random_token(10)
+    member = db.get_member(me_["id"])
+    payload = {
+        "id": iid,
+        "vendor": vendor_s,
+        "total_cents": total_cents,
+        "date": date_s,
+        "notes": notes_s,
+        "author_id": me_["id"],
+        "author_name": member["name"] if member else "",
+        "assets": asset_paths,
+        "created_at": iso, "updated_at": iso,
+    }
+    path = vault.write_invoice(payload, part_id_list)
+    payload["file_path"] = path.relative_to(vault.root).as_posix()
+    db.upsert_invoice(payload, part_id_list)
+    return enrich_invoice(db.get_invoice(iid))
+
+
+@app.patch("/api/invoices/{invoice_id}")
+async def update_invoice(invoice_id: str, req: Request):
+    me_ = require_member(req, db)
+    existing = db.get_invoice(invoice_id)
+    if not existing:
+        raise HTTPException(404, "not found")
+    if existing.get("author_id") and existing["author_id"] != me_["id"] and not me_.get("is_owner"):
+        # Permissive: any member can edit invoice metadata. Lock down later.
+        pass
+    body = await req.json()
+    iso = now_iso()
+    new = dict(existing)
+    for f in ("vendor", "date", "notes"):
+        if f in body:
+            new[f] = (body[f] or "").strip() if body[f] is not None else None
+    if "total" in body and body["total"] is not None:
+        try:
+            new["total_cents"] = int(round(float(body["total"]) * 100))
+        except (ValueError, TypeError):
+            raise HTTPException(400, "invalid total")
+    elif "total_cents" in body and body["total_cents"] is not None:
+        new["total_cents"] = int(body["total_cents"])
+    part_id_list: Optional[list[str]] = None
+    if "part_ids" in body:
+        part_id_list = [str(x) for x in (body["part_ids"] or []) if db.get_part(str(x))]
+    new["updated_at"] = iso
+    member = db.get_member(new.get("author_id") or me_["id"])
+    new["author_name"] = member["name"] if member else ""
+    path = vault.write_invoice(
+        new,
+        part_id_list if part_id_list is not None else existing.get("part_ids", []),
+    )
+    new["file_path"] = path.relative_to(vault.root).as_posix()
+    db.upsert_invoice(new, part_id_list)
+    return enrich_invoice(db.get_invoice(invoice_id))
+
+
+@app.post("/api/invoices/{invoice_id}/assets")
+async def add_invoice_assets(
+    invoice_id: str,
+    req: Request,
+    files: list[UploadFile] = File(default=[]),
+):
+    require_member(req, db)
+    existing = db.get_invoice(invoice_id)
+    if not existing:
+        raise HTTPException(404, "not found")
+    now = datetime.now(timezone.utc)
+    assets = list(existing.get("assets") or [])
+    for f in files or []:
+        if not f.filename:
+            continue
+        rel = await vault.save_asset_stream(f, f.filename, now)
+        full = vault.root / rel
+        if not full.stat().st_size:
+            full.unlink(missing_ok=True); continue
+        assets.append(rel)
+    existing["assets"] = assets
+    existing["updated_at"] = now_iso()
+    member = db.get_member(existing.get("author_id") or "")
+    existing["author_name"] = member["name"] if member else ""
+    path = vault.write_invoice(existing, existing.get("part_ids", []))
+    existing["file_path"] = path.relative_to(vault.root).as_posix()
+    db.upsert_invoice(existing, None)
+    return enrich_invoice(db.get_invoice(invoice_id))
+
+
+@app.delete("/api/invoices/{invoice_id}")
+def delete_invoice(invoice_id: str, req: Request):
+    me_ = require_member(req, db)
+    existing = db.get_invoice(invoice_id)
+    if not existing:
+        raise HTTPException(404, "not found")
+    if existing.get("author_id") and existing["author_id"] != me_["id"] and not me_.get("is_owner"):
+        raise HTTPException(403, "owner can delete others' invoices")
+    vault.delete_invoice(existing["file_path"])
+    db.delete_invoice(invoice_id)
     return {"ok": True}
 
 
@@ -677,15 +878,26 @@ def list_events(
 # ---------- stats ----------
 
 def _committed_cents(p: dict) -> int:
-    """Money already 'spent' on this part: it's either in stock, in transit,
-    or with an order placed. Falls back to qty=1 when neither on_hand nor
-    target_min give us a number."""
+    """Money already 'spent' on this part. Buckets:
+      - status=to_order  → 0   (PLANNED bucket; never counted as spent)
+      - status=in_transit / ordered → max(on_hand, target_min || 1) × unit_cost
+      - status=null & on_hand > 0   → on_hand × unit_cost  ("In house")
+      - otherwise → 0
+
+    Total spent is intentionally disjoint from planned expenses — a part
+    flagged "Yet to place" contributes nothing here even if it has some
+    on_hand carryover. That makes the four hero cards add up cleanly:
+       total_spent + planned_expenses + (nothing-counted) = project value
+       remaining = budget - total_spent  (planned does NOT reduce remaining)
+    """
     unit = p.get("unit_cost_cents") or 0
     if not unit:
         return 0
+    status = p.get("status")
+    if status == "to_order":
+        return 0  # excluded — see _planned_cents
     on_hand = float(p.get("on_hand") or 0)
     target = float(p.get("target_min") or 0)
-    status = p.get("status")
     if status in ("in_transit", "ordered"):
         qty = max(on_hand, target if target > 0 else 1.0)
         return int(round(qty * unit))
@@ -717,6 +929,7 @@ def stats(req: Request):
     remaining = budget - total_spent
     return {
         "parts": db.part_count(),
+        "invoices": db.invoice_count(),
         "members": db.member_count(),
         # New canonical totals
         "total_spent_cents": total_spent,
@@ -765,12 +978,13 @@ def list_tags(req: Request):
         "tags": tags,
         "tag_names": [t["tag"] for t in tags],
         "categories": db.categories(),
+        "vendors": db.vendors(),
     }
 
 
 # ---------- assets ----------
 
-@app.get("/asset/{path:path}")
+@app.get("/assets/{path:path}")
 def asset(path: str, req: Request):
     require_member(req, db)
     full = vault.asset_full_path(f"assets/{path}")
