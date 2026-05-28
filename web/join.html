@@ -1,0 +1,98 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Join · INVPART</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600&family=Inter+Tight:wght@200;300;400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/static/app.css?v=1">
+</head>
+<body class="join-page">
+
+<header class="topbar">
+  <div class="wrap top-grid">
+    <a href="/" class="brand"><span class="glyph"></span>INVPART</a>
+    <div class="top-mid mono cap"><span id="projectName">—</span></div>
+    <div></div>
+  </div>
+</header>
+
+<section class="join">
+  <div class="wrap join-grid">
+    <div class="join-l">
+      <div class="cap">01 · invitation</div>
+      <h1 class="tight">
+        You've been invited.<br>
+        <span class="dim">Pick a name.</span>
+      </h1>
+      <p class="dim" id="joinSub">Loading…</p>
+    </div>
+    <div class="join-r">
+      <form id="joinForm" class="join-form" hidden>
+        <label class="field">
+          <span class="cap">Display name</span>
+          <input name="name" required maxlength="40" placeholder="your name" autofocus />
+        </label>
+        <div class="join-actions">
+          <button class="pill" type="submit">join →</button>
+        </div>
+        <div class="cap dim" style="margin-top:1.5rem">
+          One-time. We remember this browser, no password.
+        </div>
+      </form>
+      <div id="joinError" class="join-error" hidden></div>
+    </div>
+  </div>
+</section>
+
+<footer class="foot">
+  <div class="wrap foot-grid">
+    <div></div>
+    <div class="foot-mid wordmark"><span class="w">INVPART</span></div>
+    <div></div>
+  </div>
+</footer>
+
+<script>
+const params = new URLSearchParams(location.search);
+const token = params.get('t') || '';
+const $sub = document.getElementById('joinSub');
+const $form = document.getElementById('joinForm');
+const $err = document.getElementById('joinError');
+const $proj = document.getElementById('projectName');
+
+async function load() {
+  if (!token) { fail('No invite token.'); return; }
+  try {
+    const r = await fetch('/api/invite/' + encodeURIComponent(token));
+    if (!r.ok) throw new Error(r.status);
+    const j = await r.json();
+    if (j.used) { fail('This invite has already been used.'); return; }
+    $proj.textContent = j.project?.name || 'inventory';
+    $sub.textContent = `Invited by ${j.invited_by}.`;
+    $form.hidden = false;
+  } catch (e) { fail('Invite not found.'); }
+}
+function fail(msg) {
+  $sub.textContent = msg;
+  $err.textContent = msg;
+  $err.hidden = false;
+}
+$form.addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const name = e.target.name.value.trim();
+  if (!name) return;
+  const r = await fetch('/api/join', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ token, name }),
+  });
+  if (r.ok) { location.href = '/'; return; }
+  const j = await r.json().catch(() => ({}));
+  fail(j.detail || 'Join failed.');
+});
+load();
+</script>
+</body>
+</html>

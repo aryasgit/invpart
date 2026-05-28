@@ -1,0 +1,279 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>INVPART</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600&family=Inter+Tight:wght@200;300;400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/static/app.css?v=1">
+</head>
+<body>
+
+<!-- ============== TOP BAR ============== -->
+<header class="topbar">
+  <div class="wrap top-grid">
+    <a href="/" class="brand"><span class="glyph"></span>INVPART</a>
+    <div class="top-mid mono cap">
+      <span id="projectName">—</span>
+      <span class="sep">·</span>
+      <span class="live"><span class="pulse"></span><span id="localTime">--:--:--</span></span>
+    </div>
+    <div class="top-right">
+      <div class="members-inline" id="membersInline"></div>
+      <button class="pill ghost" id="inviteBtn" hidden>Invite</button>
+      <button class="icon-btn" id="themeBtn" title="toggle theme">◐</button>
+    </div>
+  </div>
+</header>
+
+<!-- ============== TAB STRIP ============== -->
+<nav class="tabstrip">
+  <div class="wrap tabs">
+    <button class="tab on" data-tab="stock">Stock <span class="tab-n" id="tabnStock"></span></button>
+    <button class="tab" data-tab="activity">Activity <span class="tab-n" id="tabnActivity"></span></button>
+    <button class="tab" data-tab="pending">Pending <span class="tab-n" id="tabnPending"></span></button>
+    <button class="tab" data-tab="spend">Spend <span class="tab-n" id="tabnSpend"></span></button>
+  </div>
+</nav>
+
+<!-- ============== HERO + STATS ============== -->
+<section class="hero">
+  <div class="wrap hero-grid">
+    <div class="hero-l">
+      <div class="cap">Inventory</div>
+      <h1 class="tight" id="heroTitle">
+        Every part. Every <span class="ul">order.</span>
+        <span class="lite">Every dollar.</span>
+      </h1>
+      <div class="hero-sub dim">
+        Track stock. Log purchases. Know what's in transit. Don't lose receipts.
+      </div>
+    </div>
+    <div class="hero-r">
+      <div class="bigstats" id="bigStats"></div>
+    </div>
+  </div>
+</section>
+
+<!-- ============== STOCK TAB ============== -->
+<section class="pane on" data-pane="stock">
+  <div class="wrap">
+    <!-- Quick-add part bar (collapsed by default) -->
+    <div class="actbar">
+      <button class="pill" id="openAdd">＋ Add part</button>
+      <div class="actbar-sub">
+        <div class="filt">
+          <input id="searchInput" class="search" placeholder="search name, supplier, notes…" />
+        </div>
+        <div class="filt-cat" id="catFilters"></div>
+        <select id="sortSelect" class="select mono">
+          <option value="name">A → Z</option>
+          <option value="name_desc">Z → A</option>
+          <option value="qty">most stocked</option>
+          <option value="qty_asc">least stocked</option>
+          <option value="cost">highest value</option>
+          <option value="updated">recently updated</option>
+        </select>
+      </div>
+    </div>
+
+    <form class="addform" id="addForm" hidden>
+      <div class="fgrid">
+        <label class="field"><span class="cap">Name</span><input name="name" required placeholder="Dynamixel XL330-M288-T" /></label>
+        <label class="field"><span class="cap">Category</span><input name="category" placeholder="Actuator" /></label>
+        <label class="field"><span class="cap">Supplier</span><input name="supplier" placeholder="ROBOTIS" /></label>
+        <label class="field"><span class="cap">Product link</span><input name="link" type="url" placeholder="https://…" /></label>
+        <label class="field"><span class="cap">Unit</span>
+          <select name="unit">
+            <option value="each">each</option>
+            <option value="set">set</option>
+            <option value="m">m</option>
+            <option value="cm">cm</option>
+            <option value="kg">kg</option>
+            <option value="g">g</option>
+          </select>
+        </label>
+        <label class="field"><span class="cap">Unit cost ($)</span><input name="unit_cost" type="number" step="0.01" placeholder="0.00" /></label>
+        <label class="field"><span class="cap">On hand</span><input name="on_hand" type="number" step="0.01" value="0" /></label>
+        <label class="field"><span class="cap">Reorder at</span><input name="target_min" type="number" step="0.01" value="0" /></label>
+        <label class="field f-wide"><span class="cap">Tags <span class="dim">comma</span></span><input name="tags" placeholder="actuator, dynamixel" /></label>
+        <label class="field f-wide"><span class="cap">Notes</span><textarea name="notes" rows="2" placeholder="spec, datasheet links, anything"></textarea></label>
+        <label class="field f-wide"><span class="cap">Photo / datasheet / files</span><input name="files" type="file" multiple /></label>
+      </div>
+      <div class="addform-foot">
+        <div class="mono cap dim"><kbd>⌘</kbd><kbd>↵</kbd> save · <kbd>esc</kbd> cancel</div>
+        <div class="row-actions">
+          <button type="button" class="link" id="cancelAdd">cancel</button>
+          <button type="submit" class="pill">save part →</button>
+        </div>
+      </div>
+    </form>
+
+    <!-- Parts list -->
+    <div id="partsHead" class="feed-head">
+      <div class="cap" id="partsCount">0 parts</div>
+      <div class="feed-active" id="partsActive"></div>
+    </div>
+    <div id="partsList"></div>
+    <div id="partsEmpty" class="empty" hidden>
+      <div class="cap dim">Nothing yet</div>
+      <p class="tight">Add your first part. A motor. A bolt. A bracket.</p>
+    </div>
+  </div>
+</section>
+
+<!-- ============== ACTIVITY TAB ============== -->
+<section class="pane" data-pane="activity">
+  <div class="wrap">
+    <div class="actbar">
+      <div class="filt" id="actFilters"></div>
+    </div>
+    <div id="activityList"></div>
+    <div id="activityEmpty" class="empty" hidden>
+      <div class="cap dim">No activity yet</div>
+      <p class="tight">Orders, usages, and arrivals show up here, newest first.</p>
+    </div>
+  </div>
+</section>
+
+<!-- ============== PENDING TAB ============== -->
+<section class="pane" data-pane="pending">
+  <div class="wrap pending-grid">
+    <div>
+      <div class="cap" style="margin-bottom:.8rem">In transit</div>
+      <div id="inTransit"></div>
+      <div id="inTransitEmpty" class="empty" hidden>
+        <p class="tight" style="font-size:1.2rem">Nothing ordered.</p>
+        <div class="dim">When you place an order, it shows here until you mark it received.</div>
+      </div>
+    </div>
+    <div>
+      <div class="cap" style="margin-bottom:.8rem">Reorder list</div>
+      <div id="reorderList"></div>
+      <div id="reorderEmpty" class="empty" hidden>
+        <p class="tight" style="font-size:1.2rem">All stocked.</p>
+        <div class="dim">Parts whose count falls below their reorder threshold appear here.</div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ============== SPEND TAB ============== -->
+<section class="pane" data-pane="spend">
+  <div class="wrap">
+    <div class="spend-stats" id="spendStats"></div>
+    <div class="spend-grid">
+      <div>
+        <div class="cap" style="margin-bottom:.8rem">By month</div>
+        <div id="byMonth"></div>
+      </div>
+      <div>
+        <div class="cap" style="margin-bottom:.8rem">By category</div>
+        <div id="byCategory"></div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ============== FOOTER ============== -->
+<footer class="foot">
+  <div class="wrap foot-grid">
+    <div class="foot-l">
+      <div class="cap">Built on</div>
+      <div class="tight" style="font-size:1.05rem; margin-top:.3rem">
+        Markdown · SQLite · localhost
+      </div>
+    </div>
+    <div class="foot-mid wordmark">
+      <span class="w">INVPART</span>
+    </div>
+    <div class="foot-r">
+      <div class="cap">Vault</div>
+      <div class="mono dim" id="footVault" style="font-size:.75rem; margin-top:.3rem"></div>
+    </div>
+  </div>
+</footer>
+
+<!-- ============== INVITE DIALOG ============== -->
+<div class="dialog" id="inviteDialog" hidden>
+  <div class="dialog-card">
+    <div class="cap">Invite teammate</div>
+    <h3 class="tight">Send this link.</h3>
+    <p class="dim">Opens once on their machine. They pick a name, and they're in.</p>
+    <div class="invite-row">
+      <input id="inviteUrl" readonly class="mono" />
+      <button class="pill" id="inviteCopy">copy</button>
+    </div>
+    <div class="dialog-actions">
+      <button class="link" id="inviteClose">close</button>
+    </div>
+  </div>
+</div>
+
+<!-- ============== BOOTSTRAP DIALOG ============== -->
+<div class="dialog" id="bootstrapDialog" hidden>
+  <div class="dialog-card">
+    <div class="cap">First run</div>
+    <h3 class="tight">Name your inventory. Name yourself.</h3>
+    <p class="dim">You become the owner. Invite teammates anytime.</p>
+    <form id="bootstrapForm">
+      <label class="field"><span class="cap">Inventory name</span>
+        <input name="project" required placeholder="Quadruped V2 inventory" />
+      </label>
+      <label class="field"><span class="cap">Your name</span>
+        <input name="name" required placeholder="Barq" />
+      </label>
+      <div class="dialog-actions">
+        <button class="pill" type="submit">start →</button>
+      </div>
+    </form>
+  </div>
+</div>
+
+<!-- ============== ORDER / USE INLINE DIALOG (for a single part) ============== -->
+<div class="dialog" id="actDialog" hidden>
+  <div class="dialog-card">
+    <div class="cap" id="actDialogKind">Action</div>
+    <h3 class="tight" id="actDialogTitle">—</h3>
+    <form id="actForm">
+      <input type="hidden" name="part_id" />
+      <input type="hidden" name="action" />
+      <div class="fgrid">
+        <label class="field"><span class="cap">Quantity</span>
+          <input name="qty" type="number" step="0.01" min="0" required />
+        </label>
+        <label class="field" id="costField"><span class="cap">Unit cost ($)</span>
+          <input name="unit_cost" type="number" step="0.01" placeholder="0.00" />
+        </label>
+        <label class="field f-wide" id="supplierField"><span class="cap">Supplier</span>
+          <input name="supplier" placeholder="auto-fill from part" />
+        </label>
+        <label class="field f-wide" id="trackingField"><span class="cap">Tracking URL</span>
+          <input name="tracking_url" type="url" placeholder="https://…" />
+        </label>
+        <label class="field" id="etaField"><span class="cap">Expected arrival</span>
+          <input name="expected_arrival" type="date" />
+        </label>
+        <label class="field f-wide"><span class="cap">Note <span class="dim">why / what for</span></span>
+          <textarea name="body" rows="2"></textarea>
+        </label>
+        <label class="field f-wide" id="actFilesField"><span class="cap">Attach (invoice, photo)</span>
+          <input name="files" type="file" multiple />
+        </label>
+      </div>
+      <div class="dialog-actions">
+        <button type="button" class="link" id="actCancel">cancel</button>
+        <button type="submit" class="pill" id="actSubmit">save →</button>
+      </div>
+    </form>
+  </div>
+</div>
+
+<!-- ============== TOAST ============== -->
+<div id="toast" class="toast"></div>
+
+<script src="/static/app.js?v=1"></script>
+</body>
+</html>
