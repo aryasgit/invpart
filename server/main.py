@@ -42,13 +42,19 @@ PART_STATUSES = {"to_order", "ordered", "in_transit"}  # plus null = no status
 app = FastAPI(title="INVPART", docs_url=None, redoc_url=None)
 
 
+DEFAULT_BUDGET_CENTS = 200_00 * 1000  # $200,000.00
+
+
 def get_config() -> dict:
+    cfg = {"name": "Untitled inventory", "created": None,
+           "budget_cents": DEFAULT_BUDGET_CENTS}
     if CONFIG_PATH.exists():
         try:
-            return json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
+            cfg.update(json.loads(CONFIG_PATH.read_text(encoding="utf-8")))
         except json.JSONDecodeError:
             pass
-    return {"name": "Untitled inventory", "created": None}
+    cfg.setdefault("budget_cents", DEFAULT_BUDGET_CENTS)
+    return cfg
 
 
 def write_config(cfg: dict) -> None:
@@ -670,12 +676,54 @@ def list_events(
 
 # ---------- stats ----------
 
+def _committed_cents(p: dict) -> int:
+    """Money already 'spent' on this part: it's either in stock, in transit,
+    or with an order placed. Falls back to qty=1 when neither on_hand nor
+    target_min give us a number."""
+    unit = p.get("unit_cost_cents") or 0
+    if not unit:
+        return 0
+    on_hand = float(p.get("on_hand") or 0)
+    target = float(p.get("target_min") or 0)
+    status = p.get("status")
+    if status in ("in_transit", "ordered"):
+        qty = max(on_hand, target if target > 0 else 1.0)
+        return int(round(qty * unit))
+    if on_hand > 0:
+        return int(round(on_hand * unit))
+    return 0
+
+
+def _planned_cents(p: dict) -> int:
+    """Money for parts that still need to be ordered (status=to_order)."""
+    if p.get("status") != "to_order":
+        return 0
+    unit = p.get("unit_cost_cents") or 0
+    if not unit:
+        return 0
+    target = float(p.get("target_min") or 0)
+    qty = target if target > 0 else 1.0
+    return int(round(qty * unit))
+
+
 @app.get("/api/stats")
 def stats(req: Request):
     require_member(req, db)
+    cfg = get_config()
+    budget = int(cfg.get("budget_cents") or DEFAULT_BUDGET_CENTS)
+    parts = db.list_parts()
+    total_spent = sum(_committed_cents(p) for p in parts)
+    planned = sum(_planned_cents(p) for p in parts)
+    remaining = budget - total_spent
     return {
         "parts": db.part_count(),
         "members": db.member_count(),
+        # New canonical totals
+        "total_spent_cents": total_spent,
+        "planned_expenses_cents": planned,
+        "remaining_balance_cents": remaining,
+        "budget_cents": budget,
+        # Legacy / breakdown
         "stock_value_cents": db.total_stock_value_cents(),
         "spent_cents": db.total_spent_cents(),
         "in_transit_cents": db.in_transit_cents(),

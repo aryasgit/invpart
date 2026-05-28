@@ -240,15 +240,27 @@ function renderTopbar() {
 
 function renderHeroStats() {
   const s = state.stats;
+  const spent    = s.total_spent_cents      || 0;
+  const planned  = s.planned_expenses_cents || 0;
+  const budget   = s.budget_cents           || 0;
+  const remain   = s.remaining_balance_cents != null
+    ? s.remaining_balance_cents : (budget - spent);
+
   const items = [
-    { num: fmtMoney(s.stock_value_cents || 0, { compact: true }), lbl: 'stock value', sub: `${s.parts || 0} parts` },
-    { num: fmtMoney(s.spent_cents || 0, { compact: true }), lbl: 'total spent' },
-    { num: fmtMoney(s.in_transit_cents || 0, { compact: true }), lbl: 'in transit', sub: `${state.pending.in_transit.length || 0} orders` },
-    { num: state.pending.reorder.length || 0, lbl: 'below reorder', sub: state.pending.reorder.length ? 'attention' : 'all stocked' },
+    { num: fmtMoney(spent,   { compact: true }), lbl: 'total spent',
+      sub: 'in stock · in transit · placed' },
+    { num: fmtMoney(planned, { compact: true }), lbl: 'planned expenses',
+      sub: 'yet to be placed' },
+    { num: fmtMoney(remain,  { compact: true }), lbl: 'remaining balance',
+      sub: `of ${fmtMoney(budget, { compact: true })}` },
+    { num: fmtMoney(budget,  { compact: true }), lbl: 'budget',
+      sub: state.pending.reorder.length
+        ? `${state.pending.reorder.length} parts to order`
+        : 'all flagged' },
   ];
   $('#bigStats').innerHTML = items.map(it => `
     <div class="bigstat">
-      <div class="num">${it.num}</div>
+      <div class="num ${it.lbl === 'remaining balance' && remain < 0 ? 'neg' : ''}">${it.num}</div>
       <div class="lbl">${escapeHtml(it.lbl)}</div>
       <div class="sub">${escapeHtml(it.sub || '')}</div>
     </div>
@@ -260,7 +272,8 @@ function renderTabCounts() {
   $('#tabnActivity').textContent = state.events.length ?? '';
   const p = (state.pending.in_transit?.length || 0) + (state.pending.reorder?.length || 0);
   $('#tabnPending').textContent = p ? p : '';
-  $('#tabnSpend').textContent = state.stats.spent_cents ? fmtMoney(state.stats.spent_cents, { compact: true }) : '';
+  $('#tabnSpend').textContent = state.stats.total_spent_cents
+    ? fmtMoney(state.stats.total_spent_cents, { compact: true }) : '';
 }
 
 function renderCategoryFilter() {
@@ -577,12 +590,26 @@ function renderPending() {
 
 function renderSpend() {
   const s = state.stats;
-  $('#spendStats').innerHTML = [
-    { num: fmtMoney(s.spent_cents || 0), lbl: 'total spent' },
-    { num: fmtMoney(s.stock_value_cents || 0), lbl: 'stock value' },
-    { num: fmtMoney(s.in_transit_cents || 0), lbl: 'in transit' },
-    { num: fmtMoney(((s.by_month || [])[0]?.spent_cents) || 0), lbl: 'this month' },
-  ].map(it => `<div class="bigstat"><div class="num">${it.num}</div><div class="lbl">${escapeHtml(it.lbl)}</div></div>`).join('');
+  const spent    = s.total_spent_cents      || 0;
+  const planned  = s.planned_expenses_cents || 0;
+  const budget   = s.budget_cents           || 0;
+  const remain   = s.remaining_balance_cents != null
+    ? s.remaining_balance_cents : (budget - spent);
+
+  const items = [
+    { num: fmtMoney(spent),   lbl: 'total spent',       sub: 'in stock · in transit · placed' },
+    { num: fmtMoney(planned), lbl: 'planned expenses',  sub: 'yet to be placed' },
+    { num: fmtMoney(remain),  lbl: 'remaining balance', sub: `of ${fmtMoney(budget)}`,
+      neg: remain < 0 },
+    { num: fmtMoney(budget),  lbl: 'budget' },
+  ];
+  $('#spendStats').innerHTML = items.map(it => `
+    <div class="bigstat">
+      <div class="num ${it.neg ? 'neg' : ''}">${it.num}</div>
+      <div class="lbl">${escapeHtml(it.lbl)}</div>
+      ${it.sub ? `<div class="sub">${escapeHtml(it.sub)}</div>` : ''}
+    </div>
+  `).join('');
 
   const months = (s.by_month || []).slice().reverse();
   const maxM = Math.max(1, ...months.map(m => m.spent_cents));
