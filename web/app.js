@@ -1185,6 +1185,7 @@ function openPartDialog(part) {
     form.elements.on_hand.value = part.on_hand ?? 0;
     form.elements.status.value = part.status || '';
     form.elements.date.value = part.date || '';
+    form.elements.target_min.value = part.target_min ?? 0;
     form.elements.tags.value = (part.tags || []).join(', ');
     form.elements.notes.value = part.notes || '';
     state.partDialog.pickedCat = part.category || null;
@@ -1310,7 +1311,7 @@ async function onPartSubmit(ev) {
 
 async function submitPartCreate(f) {
   const fd = new FormData();
-  for (const name of ['name','category','supplier','link','unit','on_hand','status','date','tags','notes']) {
+  for (const name of ['name','category','supplier','link','unit','on_hand','target_min','status','date','tags','notes']) {
     const v = f.elements[name]?.value || '';
     if (v) fd.set(name, v);
   }
@@ -1330,6 +1331,7 @@ async function submitPartEdit(f) {
     link: f.elements.link.value.trim(),
     unit: f.elements.unit.value,
     on_hand: parseFloat(f.elements.on_hand.value) || 0,
+    target_min: parseFloat(f.elements.target_min.value) || 0,
     status: f.elements.status.value || null,
     date: f.elements.date.value || null,
     notes: f.elements.notes.value,
