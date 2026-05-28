@@ -649,6 +649,7 @@ kbd {
   display: flex; flex-direction: column; gap: 1rem;
   max-height: 90vh; overflow-y: auto;
 }
+.dialog-card.dialog-wide { max-width: 820px; }
 .dialog-card h3 {
   font-family: 'Inter Tight'; font-weight: 500;
   font-size: 1.55rem; letter-spacing: -.025em; line-height: 1.1;
@@ -703,3 +704,57 @@ kbd {
 .join-actions { display: flex; justify-content: flex-end; margin-top: 1rem; }
 .join-error { color: var(--error); font-family: 'JetBrains Mono'; font-size: .8rem;
   padding: 1rem 0; border-top: 1px solid var(--line); }
+
+/* ============== suggestion chips (category, tags) ============== */
+
+.sug-chips {
+  display: flex; flex-wrap: wrap; gap: .3rem;
+  margin-top: .55rem;
+}
+.sug-chips .sug {
+  font-family: 'JetBrains Mono'; font-size: .68rem;
+  padding: .18rem .45rem;
+  border: 1px solid var(--line-2); color: var(--dim);
+  cursor: pointer; transition: color .15s, border-color .15s, background .15s;
+  user-select: none;
+}
+.sug-chips .sug:hover { color: var(--text); border-color: var(--text-2); }
+.sug-chips .sug.picked {
+  color: var(--bg); background: var(--text); border-color: var(--text);
+}
+.sug-chips .sug.picked:hover { background: var(--text-2); border-color: var(--text-2); }
+.sug-chips .empty {
+  font-family: 'JetBrains Mono'; font-size: .66rem; color: var(--faint);
+  font-style: italic;
+}
+
+/* ============== status badge (on part rows) ============== */
+
+.part-status {
+  display: inline-flex; align-items: center; gap: .25rem;
+  font-family: 'JetBrains Mono'; font-size: .58rem;
+  color: var(--text-2); padding: .1rem .4rem;
+  border: 1px solid var(--line-3);
+  text-transform: uppercase; letter-spacing: .12em;
+  margin-left: .55rem; vertical-align: middle;
+  white-space: nowrap;
+}
+.part-status.s-to_order { color: var(--error); border-color: var(--error); }
+.part-status.s-ordered  { color: var(--text); border-color: var(--text); }
+.part-status.s-in_transit { color: var(--live); border-color: var(--live); }
+.part-name .part-status { font-family: 'JetBrains Mono'; font-weight: 400; }
+
+/* ============== existing-assets list (inside edit dialog) ============== */
+
+.existing-assets {
+  display: flex; flex-wrap: wrap; gap: .35rem; margin-top: .6rem;
+}
+.existing-assets .ea {
+  display: inline-flex; align-items: center; gap: .35rem;
+  font-family: 'JetBrains Mono'; font-size: .65rem; color: var(--dim);
+  border: 1px solid var(--line-2); padding: .2rem .4rem;
+  text-decoration: none;
+}
+.existing-assets .ea:hover { color: var(--text); border-color: var(--text-2); }
+.existing-assets .ea .x { color: var(--faint); cursor: pointer; margin-left: .25rem; }
+.existing-assets .ea .x:hover { color: var(--error); }

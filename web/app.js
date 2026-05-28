@@ -13,9 +13,11 @@ const state = {
   stats: {},
   pending: { in_transit: [], reorder: [] },
   categories: [],
+  tagNames: [],
   filter: { tab: 'stock', q: '', category: null, sort: 'name', evtType: null },
   openParts: new Set(),
   openEvents: new Set(),
+  partDialog: { mode: 'add', editingId: null, pickedTags: new Set(), pickedCat: null, existingAssets: [], removedAssets: new Set() },
 };
 
 const $ = (sel, root = document) => root.querySelector(sel);
@@ -129,7 +131,7 @@ async function boot() {
   bindTabs();
   bindGlobal();
   bindTheme();
-  bindAddForm();
+  bindPartDialog();
   bindActDialog();
   bindInvite();
   bindBootstrap();
@@ -159,12 +161,13 @@ async function boot() {
 }
 
 async function refreshAll() {
-  const [parts, events, stats, members, pending] = await Promise.all([
+  const [parts, events, stats, members, pending, tags] = await Promise.all([
     api('/api/parts?' + partsQuery()),
     api('/api/events?limit=200'),
     api('/api/stats'),
     api('/api/members'),
     api('/api/pending'),
+    api('/api/tags'),
   ]);
   state.parts = parts.parts;
   state.events = events.events;
@@ -172,6 +175,7 @@ async function refreshAll() {
   state.members = members.members;
   state.pending = pending;
   state.categories = stats.categories || [];
+  state.tagNames = tags.tag_names || [];
 }
 
 function partsQuery() {
@@ -323,6 +327,12 @@ function renderParts() {
   });
 }
 
+const STATUS_LABEL = {
+  to_order: 'Yet to place',
+  ordered: 'Order placed',
+  in_transit: 'In transit',
+};
+
 function renderPartRow(p) {
   const low = p.target_min > 0 && p.on_hand < p.target_min;
   const totalVal = p.unit_cost_cents != null ? p.unit_cost_cents * p.on_hand : null;
@@ -330,12 +340,15 @@ function renderPartRow(p) {
   const thumb = imgUrl
     ? `<img src="${escapeHtml(imgUrl)}" alt="">`
     : `${escapeHtml(thumbInitials(p.name))}`;
+  const statusBadge = p.status && STATUS_LABEL[p.status]
+    ? `<span class="part-status s-${escapeHtml(p.status)}">${escapeHtml(STATUS_LABEL[p.status])}</span>`
+    : '';
   return `
     <div class="part" data-id="${escapeHtml(p.id)}">
       <div class="part-head">
         <div class="part-thumb">${thumb}</div>
         <div class="part-name tight">
-          ${escapeHtml(p.name)}
+          ${escapeHtml(p.name)}${statusBadge}
           ${p.supplier ? `<span class="sup">${escapeHtml(p.supplier)}${p.link ? ' ·' : ''}</span>` : ''}
         </div>
         <div class="part-cat">${escapeHtml(p.category || '')}</div>
@@ -626,34 +639,27 @@ function switchTab(tab) {
   $$('.pane').forEach(p => p.classList.toggle('on', p.dataset.pane === tab));
 }
 
-// ====================== add part form ======================
+// ====================== part dialog (add + edit) ======================
 
-function bindAddForm() {
-  $('#openAdd').addEventListener('click', () => {
-    const f = $('#addForm');
-    f.hidden = !f.hidden;
-    if (!f.hidden) f.querySelector('input[name="name"]').focus();
+function bindPartDialog() {
+  $('#openAdd').addEventListener('click', () => openPartDialog(null));
+  $('#cancelPart').addEventListener('click', () => closePartDialog());
+  $('#partDialog').addEventListener('click', (ev) => {
+    if (ev.target === $('#partDialog')) closePartDialog();
   });
-  $('#cancelAdd').addEventListener('click', () => { $('#addForm').hidden = true; $('#addForm').reset(); });
-  $('#addForm').addEventListener('submit', async (ev) => {
-    ev.preventDefault();
-    const f = ev.target;
-    const fd = new FormData();
-    for (const name of ['name','category','supplier','link','unit','on_hand','target_min','tags','notes']) {
-      const v = f.elements[name]?.value || '';
-      if (v) fd.set(name, v);
+  $('#partForm').addEventListener('submit', onPartSubmit);
+
+  // Cmd+Enter / Ctrl+Enter submits, even from textarea
+  $('#partForm').addEventListener('keydown', (ev) => {
+    if (ev.key === 'Enter' && (ev.metaKey || ev.ctrlKey)) {
+      ev.preventDefault();
+      $('#partForm').requestSubmit();
     }
-    const cost = f.elements.unit_cost.value;
-    if (cost) fd.set('unit_cost_cents', String(Math.round(parseFloat(cost) * 100)));
-    const filesEl = f.elements.files;
-    for (const file of filesEl.files || []) fd.append('files', file);
-    try {
-      await apiForm('/api/parts', fd);
-      f.reset(); f.hidden = true;
-      await refreshAll(); renderAll();
-      toast('part added');
-    } catch (err) { toast('failed: ' + err.message, 'err'); }
   });
+
+  // Category chip cloud (live)
+  // Tag chip cloud (live) — both wired in renderPartDialogSuggestions
+
   $('#searchInput').addEventListener('input', (e) => {
     clearTimeout($('#searchInput')._h);
     $('#searchInput')._h = setTimeout(() => {
@@ -665,6 +671,195 @@ function bindAddForm() {
     state.filter.sort = e.target.value;
     refreshParts();
   });
+}
+
+function openPartDialog(part) {
+  const dlg = $('#partDialog');
+  const form = $('#partForm');
+  form.reset();
+  state.partDialog.removedAssets = new Set();
+  state.partDialog.existingAssets = [];
+
+  if (part) {
+    // Edit mode
+    state.partDialog.mode = 'edit';
+    state.partDialog.editingId = part.id;
+    $('#partDialogKind').textContent = 'Edit part';
+    $('#partDialogTitle').textContent = part.name;
+    $('#savePart').textContent = 'save changes →';
+    form.elements.id.value = part.id;
+    form.elements.name.value = part.name || '';
+    form.elements.category.value = part.category || '';
+    form.elements.supplier.value = part.supplier || '';
+    form.elements.link.value = part.link || '';
+    form.elements.unit.value = part.unit || 'each';
+    form.elements.unit_cost.value = part.unit_cost_cents != null
+      ? (part.unit_cost_cents / 100).toFixed(2) : '';
+    form.elements.on_hand.value = part.on_hand ?? 0;
+    form.elements.status.value = part.status || '';
+    form.elements.tags.value = (part.tags || []).join(', ');
+    form.elements.notes.value = part.notes || '';
+    state.partDialog.pickedCat = part.category || null;
+    state.partDialog.pickedTags = new Set(part.tags || []);
+    state.partDialog.existingAssets = part.assets || [];
+  } else {
+    // Add mode
+    state.partDialog.mode = 'add';
+    state.partDialog.editingId = null;
+    $('#partDialogKind').textContent = 'Add part';
+    $('#partDialogTitle').textContent = 'New part.';
+    $('#savePart').textContent = 'save part →';
+    state.partDialog.pickedCat = null;
+    state.partDialog.pickedTags = new Set();
+  }
+
+  renderPartDialogSuggestions();
+  renderExistingAssets();
+
+  // Re-render chips live so the "picked" state stays accurate as user types.
+  if (!form._suggBound) {
+    form.elements.category.addEventListener('input', () => renderPartDialogSuggestions());
+    form.elements.tags.addEventListener('input', () => renderPartDialogSuggestions());
+    form._suggBound = true;
+  }
+
+  dlg.hidden = false;
+  setTimeout(() => form.elements.name.focus(), 30);
+}
+
+function closePartDialog() {
+  $('#partDialog').hidden = true;
+  $('#partForm').reset();
+  state.partDialog.editingId = null;
+  state.partDialog.pickedTags = new Set();
+  state.partDialog.pickedCat = null;
+  state.partDialog.existingAssets = [];
+  state.partDialog.removedAssets = new Set();
+}
+
+function renderPartDialogSuggestions() {
+  // Category datalist + chips
+  const catDl = $('#catSuggest');
+  catDl.innerHTML = (state.categories || []).map(c =>
+    `<option value="${escapeHtml(c)}">`).join('');
+  const catChips = $('#catChips');
+  if (!state.categories.length) {
+    catChips.innerHTML = '<span class="empty">no categories yet — type one to create</span>';
+  } else {
+    const current = $('#partForm').elements.category.value.trim();
+    catChips.innerHTML = state.categories.slice(0, 12).map(c => `
+      <span class="sug ${current === c ? 'picked' : ''}" data-cat="${escapeHtml(c)}">${escapeHtml(c)}</span>
+    `).join('');
+    $$('.sug', catChips).forEach(b => b.addEventListener('click', () => {
+      $('#partForm').elements.category.value = b.dataset.cat;
+      renderPartDialogSuggestions();
+    }));
+  }
+
+  // Tag datalist + chips (multi-select)
+  const tagDl = $('#tagSuggest');
+  tagDl.innerHTML = (state.tagNames || []).map(t =>
+    `<option value="${escapeHtml(t)}">`).join('');
+  const tagChips = $('#tagChips');
+  if (!state.tagNames.length) {
+    tagChips.innerHTML = '<span class="empty">no tags yet — type comma-separated</span>';
+  } else {
+    const cur = parseTagsInput($('#partForm').elements.tags.value);
+    tagChips.innerHTML = state.tagNames.slice(0, 30).map(t => `
+      <span class="sug ${cur.has(t) ? 'picked' : ''}" data-tag="${escapeHtml(t)}">${escapeHtml(t)}</span>
+    `).join('');
+    $$('.sug', tagChips).forEach(b => b.addEventListener('click', () => {
+      const t = b.dataset.tag;
+      const input = $('#partForm').elements.tags;
+      const set = parseTagsInput(input.value);
+      if (set.has(t)) set.delete(t); else set.add(t);
+      input.value = Array.from(set).join(', ');
+      renderPartDialogSuggestions();
+    }));
+  }
+}
+
+function renderExistingAssets() {
+  const box = $('#existingAssets');
+  const items = state.partDialog.existingAssets || [];
+  if (!items.length) { box.hidden = true; box.innerHTML = ''; return; }
+  box.hidden = false;
+  // Read-only list of attachments already on the part — clicking opens them.
+  // (Removing files isn't supported by the API yet; this is informational.)
+  box.innerHTML = items.map(a => {
+    const url = '/' + a.path.replace(/^\/+/, '');
+    return `<a class="ea" href="${escapeHtml(url)}" target="_blank">${escapeHtml(a.name)}</a>`;
+  }).join('');
+}
+
+function parseTagsInput(s) {
+  return new Set(
+    (s || '').split(',').map(t => t.trim().toLowerCase()).filter(Boolean)
+  );
+}
+
+async function onPartSubmit(ev) {
+  ev.preventDefault();
+  const f = ev.target;
+  const submitBtn = $('#savePart');
+  if (submitBtn.disabled) return;
+  submitBtn.disabled = true;
+  try {
+    if (state.partDialog.mode === 'edit') {
+      await submitPartEdit(f);
+    } else {
+      await submitPartCreate(f);
+    }
+    closePartDialog();
+    await refreshAll(); renderAll();
+    toast(state.partDialog.mode === 'edit' ? 'saved' : 'part added');
+  } catch (err) {
+    toast('failed: ' + err.message, 'err');
+  } finally {
+    submitBtn.disabled = false;
+  }
+}
+
+async function submitPartCreate(f) {
+  const fd = new FormData();
+  for (const name of ['name','category','supplier','link','unit','on_hand','status','tags','notes']) {
+    const v = f.elements[name]?.value || '';
+    if (v) fd.set(name, v);
+  }
+  const cost = f.elements.unit_cost.value;
+  if (cost) fd.set('unit_cost_cents', String(Math.round(parseFloat(cost) * 100)));
+  for (const file of f.elements.files.files || []) fd.append('files', file);
+  await apiForm('/api/parts', fd);
+}
+
+async function submitPartEdit(f) {
+  const id = state.partDialog.editingId;
+  // 1) PATCH the metadata
+  const body = {
+    name: f.elements.name.value.trim(),
+    category: f.elements.category.value.trim(),
+    supplier: f.elements.supplier.value.trim(),
+    link: f.elements.link.value.trim(),
+    unit: f.elements.unit.value,
+    on_hand: parseFloat(f.elements.on_hand.value) || 0,
+    status: f.elements.status.value || null,
+    notes: f.elements.notes.value,
+    tags: Array.from(parseTagsInput(f.elements.tags.value)),
+  };
+  const cost = f.elements.unit_cost.value;
+  body.unit_cost_cents = cost ? Math.round(parseFloat(cost) * 100) : null;
+  await api(`/api/parts/${id}`, {
+    method: 'PATCH', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+
+  // 2) If files added, POST them as additional assets
+  const files = f.elements.files.files || [];
+  if (files.length) {
+    const fd = new FormData();
+    for (const file of files) fd.append('files', file);
+    await apiForm(`/api/parts/${id}/assets`, fd);
+  }
 }
 
 // ====================== part actions (order/use/adjust/edit/delete) ======================
@@ -766,36 +961,7 @@ function bindActDialog() {
 }
 
 function openEditPart(p) {
-  // Quick inline edit via prompts (V1 — improve later)
-  const fields = [
-    { k: 'name', label: 'Name' },
-    { k: 'category', label: 'Category' },
-    { k: 'supplier', label: 'Supplier' },
-    { k: 'link', label: 'Product link' },
-    { k: 'unit_cost', label: 'Unit cost ($)', cur: p.unit_cost_cents != null ? (p.unit_cost_cents/100).toFixed(2) : '' },
-    { k: 'target_min', label: 'Reorder threshold' },
-    { k: 'notes', label: 'Notes (markdown)' },
-  ];
-  const out = {};
-  for (const fd of fields) {
-    const cur = fd.cur ?? p[fd.k] ?? '';
-    const v = prompt(fd.label + ':', cur);
-    if (v === null) return;  // user cancelled
-    out[fd.k] = v;
-  }
-  const body = {};
-  for (const [k, v] of Object.entries(out)) {
-    if (k === 'unit_cost') body.unit_cost_cents = v ? Math.round(parseFloat(v) * 100) : null;
-    else if (k === 'target_min') body.target_min = parseFloat(v) || 0;
-    else body[k] = v;
-  }
-  api(`/api/parts/${p.id}`, {
-    method: 'PATCH',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(body),
-  }).then(async () => {
-    await refreshAll(); renderAll(); toast('saved');
-  }).catch(err => toast('failed: ' + err.message, 'err'));
+  openPartDialog(p);
 }
 
 // ====================== event actions ======================

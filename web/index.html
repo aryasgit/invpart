@@ -7,7 +7,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600&family=Inter+Tight:wght@200;300;400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="/static/app.css?v=1">
+  <link rel="stylesheet" href="/static/app.css?v=3">
 </head>
 <body>
 
@@ -78,38 +78,6 @@
         </select>
       </div>
     </div>
-
-    <form class="addform" id="addForm" hidden>
-      <div class="fgrid">
-        <label class="field"><span class="cap">Name</span><input name="name" required placeholder="Dynamixel XL330-M288-T" /></label>
-        <label class="field"><span class="cap">Category</span><input name="category" placeholder="Actuator" /></label>
-        <label class="field"><span class="cap">Supplier</span><input name="supplier" placeholder="ROBOTIS" /></label>
-        <label class="field"><span class="cap">Product link</span><input name="link" type="url" placeholder="https://…" /></label>
-        <label class="field"><span class="cap">Unit</span>
-          <select name="unit">
-            <option value="each">each</option>
-            <option value="set">set</option>
-            <option value="m">m</option>
-            <option value="cm">cm</option>
-            <option value="kg">kg</option>
-            <option value="g">g</option>
-          </select>
-        </label>
-        <label class="field"><span class="cap">Unit cost ($)</span><input name="unit_cost" type="number" step="0.01" placeholder="0.00" /></label>
-        <label class="field"><span class="cap">On hand</span><input name="on_hand" type="number" step="0.01" value="0" /></label>
-        <label class="field"><span class="cap">Reorder at</span><input name="target_min" type="number" step="0.01" value="0" /></label>
-        <label class="field f-wide"><span class="cap">Tags <span class="dim">comma</span></span><input name="tags" placeholder="actuator, dynamixel" /></label>
-        <label class="field f-wide"><span class="cap">Notes</span><textarea name="notes" rows="2" placeholder="spec, datasheet links, anything"></textarea></label>
-        <label class="field f-wide"><span class="cap">Photo / datasheet / files</span><input name="files" type="file" multiple /></label>
-      </div>
-      <div class="addform-foot">
-        <div class="mono cap dim"><kbd>⌘</kbd><kbd>↵</kbd> save · <kbd>esc</kbd> cancel</div>
-        <div class="row-actions">
-          <button type="button" class="link" id="cancelAdd">cancel</button>
-          <button type="submit" class="pill">save part →</button>
-        </div>
-      </div>
-    </form>
 
     <!-- Parts list -->
     <div id="partsHead" class="feed-head">
@@ -196,6 +164,76 @@
   </div>
 </footer>
 
+<!-- ============== PART DIALOG (add + edit) ============== -->
+<div class="dialog" id="partDialog" hidden>
+  <div class="dialog-card dialog-wide">
+    <div class="cap" id="partDialogKind">Add part</div>
+    <h3 class="tight" id="partDialogTitle">New part.</h3>
+    <form id="partForm" autocomplete="off">
+      <input type="hidden" name="id" />
+      <div class="fgrid">
+        <label class="field f-wide"><span class="cap">Name</span>
+          <input name="name" required placeholder="Dynamixel XL330-M288-T" />
+        </label>
+        <label class="field f-wide"><span class="cap">Category <span class="dim">type new or pick existing</span></span>
+          <input name="category" list="catSuggest" placeholder="Actuator" />
+          <datalist id="catSuggest"></datalist>
+          <div class="sug-chips" id="catChips"></div>
+        </label>
+        <label class="field"><span class="cap">Supplier</span>
+          <input name="supplier" placeholder="ROBOTIS" />
+        </label>
+        <label class="field"><span class="cap">Product link</span>
+          <input name="link" type="url" placeholder="https://…" />
+        </label>
+        <label class="field"><span class="cap">Unit</span>
+          <select name="unit">
+            <option value="each">each</option>
+            <option value="set">set</option>
+            <option value="m">m</option>
+            <option value="cm">cm</option>
+            <option value="kg">kg</option>
+            <option value="g">g</option>
+          </select>
+        </label>
+        <label class="field"><span class="cap">Unit cost ($)</span>
+          <input name="unit_cost" type="number" step="0.01" placeholder="0.00" />
+        </label>
+        <label class="field"><span class="cap">On hand</span>
+          <input name="on_hand" type="number" step="0.01" value="0" />
+        </label>
+        <label class="field"><span class="cap">Status</span>
+          <select name="status">
+            <option value="">— stocked, no flag —</option>
+            <option value="to_order">Yet to place</option>
+            <option value="ordered">Order placed</option>
+            <option value="in_transit">In transit</option>
+          </select>
+        </label>
+        <label class="field f-wide"><span class="cap">Tags <span class="dim">type new or click existing</span></span>
+          <input name="tags" list="tagSuggest" placeholder="actuator, dynamixel" />
+          <datalist id="tagSuggest"></datalist>
+          <div class="sug-chips" id="tagChips"></div>
+        </label>
+        <label class="field f-wide"><span class="cap">Notes</span>
+          <textarea name="notes" rows="3" placeholder="spec, datasheet links, anything"></textarea>
+        </label>
+        <label class="field f-wide"><span class="cap">Photo / datasheet / files</span>
+          <input name="files" type="file" multiple />
+          <div class="existing-assets" id="existingAssets" hidden></div>
+        </label>
+      </div>
+      <div class="addform-foot">
+        <div class="mono cap dim"><kbd>⌘</kbd><kbd>↵</kbd> save · <kbd>esc</kbd> cancel</div>
+        <div class="row-actions">
+          <button type="button" class="link" id="cancelPart">cancel</button>
+          <button type="submit" class="pill" id="savePart">save part →</button>
+        </div>
+      </div>
+    </form>
+  </div>
+</div>
+
 <!-- ============== INVITE DIALOG ============== -->
 <div class="dialog" id="inviteDialog" hidden>
   <div class="dialog-card">
@@ -274,6 +312,6 @@
 <!-- ============== TOAST ============== -->
 <div id="toast" class="toast"></div>
 
-<script src="/static/app.js?v=1"></script>
+<script src="/static/app.js?v=3"></script>
 </body>
 </html>

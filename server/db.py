@@ -47,6 +47,7 @@ CREATE TABLE IF NOT EXISTS parts (
     on_hand REAL NOT NULL DEFAULT 0,
     on_order REAL NOT NULL DEFAULT 0,
     target_min REAL NOT NULL DEFAULT 0,
+    status TEXT,
     notes TEXT NOT NULL DEFAULT '',
     image TEXT,
     tags TEXT NOT NULL DEFAULT '[]',
@@ -111,6 +112,20 @@ class DB:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with self.conn() as c:
             c.executescript(SCHEMA)
+            self._migrate(c)
+
+    @staticmethod
+    def _migrate(c: sqlite3.Connection) -> None:
+        """Idempotent column additions for existing databases."""
+        migrations = [
+            "ALTER TABLE parts ADD COLUMN status TEXT",
+        ]
+        for stmt in migrations:
+            try:
+                c.execute(stmt)
+            except sqlite3.OperationalError as e:
+                if "duplicate column" not in str(e).lower():
+                    raise
 
     @contextmanager
     def conn(self) -> Iterator[sqlite3.Connection]:
@@ -218,15 +233,16 @@ class DB:
             c.execute(
                 """INSERT INTO parts
                    (id,name,category,supplier,link,unit,unit_cost_cents,
-                    on_hand,on_order,target_min,notes,image,tags,assets,
+                    on_hand,on_order,target_min,status,notes,image,tags,assets,
                     file_path,created_at,updated_at,created_by)
-                   VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                   VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                    ON CONFLICT(id) DO UPDATE SET
                      name=excluded.name, category=excluded.category,
                      supplier=excluded.supplier, link=excluded.link,
                      unit=excluded.unit, unit_cost_cents=excluded.unit_cost_cents,
                      on_hand=excluded.on_hand, on_order=excluded.on_order,
-                     target_min=excluded.target_min, notes=excluded.notes,
+                     target_min=excluded.target_min, status=excluded.status,
+                     notes=excluded.notes,
                      image=excluded.image, tags=excluded.tags,
                      assets=excluded.assets, file_path=excluded.file_path,
                      updated_at=excluded.updated_at""",
@@ -234,6 +250,7 @@ class DB:
                     p["id"], p["name"], p.get("category"), p.get("supplier"),
                     p.get("link"), p.get("unit", "each"), p.get("unit_cost_cents"),
                     p.get("on_hand", 0), p.get("on_order", 0), p.get("target_min", 0),
+                    p.get("status"),
                     p.get("notes", ""), p.get("image"),
                     json.dumps(p.get("tags") or []),
                     json.dumps(p.get("assets") or []),
@@ -257,6 +274,7 @@ class DB:
         q: Optional[str] = None,
         category: Optional[str] = None,
         tag: Optional[str] = None,
+        status: Optional[str] = None,
         low_stock: bool = False,
         sort: str = "name",
     ) -> list[dict]:
@@ -271,6 +289,9 @@ class DB:
         if tag:
             sql += " AND id IN (SELECT part_id FROM part_tags WHERE tag = ?)"
             args.append(tag)
+        if status:
+            sql += " AND status = ?"
+            args.append(status)
         if low_stock:
             sql += " AND on_hand < target_min AND target_min > 0"
         sort_map = {
@@ -293,13 +314,19 @@ class DB:
 
     @staticmethod
     def _row_to_part(r) -> dict:
+        # Defensive: status column may not exist on very old DBs that pre-date
+        # the migration (shouldn't happen since __init__ runs it, but safe).
+        try:
+            status = r["status"]
+        except (KeyError, IndexError):
+            status = None
         return {
             "id": r["id"], "name": r["name"], "category": r["category"],
             "supplier": r["supplier"], "link": r["link"], "unit": r["unit"],
             "unit_cost_cents": r["unit_cost_cents"],
             "on_hand": r["on_hand"], "on_order": r["on_order"],
-            "target_min": r["target_min"], "notes": r["notes"],
-            "image": r["image"],
+            "target_min": r["target_min"], "status": status,
+            "notes": r["notes"], "image": r["image"],
             "tags": json.loads(r["tags"] or "[]"),
             "assets": json.loads(r["assets"] or "[]"),
             "file_path": r["file_path"],

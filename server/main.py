@@ -37,6 +37,7 @@ CONFIG_PATH = VAULT_DIR / "project.json"
 
 EVENT_TYPES = {"order", "arrival", "use", "adjust", "note"}
 ORDER_STATUSES = {"planned", "placed", "in_transit", "received", "cancelled"}
+PART_STATUSES = {"to_order", "ordered", "in_transit"}  # plus null = no status
 
 app = FastAPI(title="INVPART", docs_url=None, redoc_url=None)
 
@@ -260,11 +261,12 @@ def list_parts(
     q: Optional[str] = None,
     category: Optional[str] = None,
     tag: Optional[str] = None,
+    status: Optional[str] = None,
     low_stock: bool = False,
     sort: str = "name",
 ):
     require_member(req, db)
-    rows = db.list_parts(q=q, category=category, tag=tag,
+    rows = db.list_parts(q=q, category=category, tag=tag, status=status,
                          low_stock=low_stock, sort=sort)
     return {"parts": [enrich_part(p) for p in rows]}
 
@@ -289,6 +291,7 @@ async def create_part(
     unit_cost_cents: Optional[int] = Form(None),
     on_hand: float = Form(0),
     target_min: float = Form(0),
+    status: str = Form(""),
     notes: str = Form(""),
     tags: str = Form(""),
     files: list[UploadFile] = File(default=[]),
@@ -318,6 +321,9 @@ async def create_part(
     tag_list = sorted({t.strip().lstrip("#").lower()
                        for t in tags.split(",") if t.strip()})
 
+    st = (status or "").strip().lower() or None
+    if st and st not in PART_STATUSES:
+        st = None
     payload = {
         "id": pid, "name": name,
         "category": (category or "").strip() or None,
@@ -328,6 +334,7 @@ async def create_part(
         "on_hand": max(0.0, on_hand or 0),
         "on_order": 0,
         "target_min": max(0.0, target_min or 0),
+        "status": st,
         "notes": notes or "",
         "image": image,
         "tags": tag_list,
@@ -365,6 +372,9 @@ async def update_part(part_id: str, req: Request):
     for f in ("unit_cost_cents", "on_hand", "on_order", "target_min"):
         if f in body and body[f] is not None:
             new[f] = float(body[f]) if f != "unit_cost_cents" else int(body[f])
+    if "status" in body:
+        s = (body["status"] or "").strip().lower() if body["status"] else None
+        new["status"] = s if s in PART_STATUSES else None
     if "tags" in body:
         new["tags"] = sorted({str(t).lstrip("#").lower()
                               for t in (body["tags"] or [])})
@@ -681,17 +691,33 @@ def pending(req: Request):
     require_member(req, db)
     orders = db.in_transit_orders()
     mm = members_map()
+    # "Reorder list" is now driven by the part-level status flag the user
+    # explicitly sets. We surface parts they've flagged as "to_order"
+    # alongside any old-style low-stock parts (so existing target_min data
+    # still has meaning if it was set on legacy entries).
+    to_order = db.list_parts(status="to_order", sort="updated")
     low = db.list_parts(low_stock=True, sort="qty_asc")
+    seen = {p["id"] for p in to_order}
+    reorder = list(to_order) + [p for p in low if p["id"] not in seen]
+    flagged_transit = db.list_parts(status="in_transit", sort="updated")
+    flagged_ordered = db.list_parts(status="ordered", sort="updated")
     return {
         "in_transit": [enrich_event(e, mm) for e in orders],
-        "reorder": [enrich_part(p) for p in low],
+        "reorder": [enrich_part(p) for p in reorder],
+        "flagged_in_transit": [enrich_part(p) for p in flagged_transit],
+        "flagged_ordered": [enrich_part(p) for p in flagged_ordered],
     }
 
 
 @app.get("/api/tags")
 def list_tags(req: Request):
     require_member(req, db)
-    return {"tags": db.all_tags(), "categories": db.categories()}
+    tags = db.all_tags()
+    return {
+        "tags": tags,
+        "tag_names": [t["tag"] for t in tags],
+        "categories": db.categories(),
+    }
 
 
 # ---------- assets ----------
